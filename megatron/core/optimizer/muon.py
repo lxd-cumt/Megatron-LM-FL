@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 import torch.distributed as dist
@@ -374,3 +374,26 @@ class Muon(torch.optim.Optimizer):
                 scale = bias_correction1 / bias_correction2**0.5
                 p.data.mul_(1 - lr * weight_decay)
                 p.data.add_(g, alpha=-lr / scale)
+
+
+def get_megatron_muon_optimizer(*args: Any, **kwargs: Any) -> Any:
+    """Backward compatible muon optimizer getter.
+
+    .. deprecated::
+        Use :func:`megatron.core.optimizer.get_megatron_optimizer` instead.
+    """
+    from . import get_megatron_optimizer
+
+    use_layer_wise = kwargs.pop('layer_wise_distributed_optimizer', False)
+
+    if "config" in kwargs:
+        config = kwargs["config"]
+    else:
+        config = args[0]
+
+    if use_layer_wise and not config.optimizer.startswith('dist_'):
+        raise ValueError(
+            "Layer-wise distributed optimizer is enabled by dist_ prefix in optimizer name."
+        )
+
+    return get_megatron_optimizer(*args, **kwargs)
