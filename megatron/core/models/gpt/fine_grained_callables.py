@@ -23,6 +23,9 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
 from megatron.core.utils import internal_api
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 
 def weak_method(method):
@@ -316,7 +319,7 @@ class TransformerLayerNode(ScheduleNode):
         """Computes the weight gradients for the transformer layer node."""
         if not self.delay_wgrad_compute:
             return
-        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+        with cur_platform.range(f"{self.name} wgrad"):
             for module in self.bwd_dw_callables:
                 module.backward_dw()
 
@@ -449,8 +452,19 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 packed_seq_params: Optional[PackedSeqParams] = None,
                 sequence_len_offset: Optional[Tensor] = None,
             ):
-                hidden_states, _ = layer._forward_attention(
-                    hidden_states=hidden_states,
+                if getattr(node.layer_state, "is_engram", False):
+                    hash_input_ids = node.chunk_state.extra_block_kwargs["engram_hash_input_ids"]
+                    hidden_states_local = (
+                        node.layer_state.engram(
+                            hidden_states=hidden_states,
+                            hash_input_ids=hash_input_ids[node.layer_state.engram_hash_layer_id],
+                        )
+                        + hidden_states
+                    )
+                else:
+                    hidden_states_local = hidden_states
+                hidden_states_local, _ = layer._forward_attention(
+                    hidden_states=hidden_states_local,
                     attention_mask=attention_mask,
                     rotary_pos_emb=rotary_pos_emb,
                     rotary_pos_cos=rotary_pos_cos,
@@ -459,27 +473,27 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                     sequence_len_offset=sequence_len_offset,
                 )
                 if not isinstance(layer.mlp, MoELayer):
-                    return hidden_states, None, None, None
+                    return hidden_states_local, None, None, None
                 if layer.recompute_pre_mlp_layernorm:
                     layer.pre_mlp_norm_checkpoint = tensor_parallel.CheckpointWithoutOutput()
                     with off_interface(
-                        layer.offload_mlp_norm, hidden_states, "mlp_norm"
-                    ) as hidden_states:
+                        layer.offload_mlp_norm, hidden_states_local, "mlp_norm"
+                    ) as hidden_states_local:
                         pre_mlp_layernorm_output = layer.pre_mlp_norm_checkpoint.checkpoint(
-                            layer.pre_mlp_layernorm, hidden_states
+                            layer.pre_mlp_layernorm, hidden_states_local
                         )
                 else:
                     with off_interface(
-                        layer.offload_mlp_norm, hidden_states, "mlp_norm"
-                    ) as hidden_states:
-                        pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
+                        layer.offload_mlp_norm, hidden_states_local, "mlp_norm"
+                    ) as hidden_states_local:
+                        pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states_local)
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
                 probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
-                return hidden_states, local_tokens, probs, shared_expert_output
+                return hidden_states_local, local_tokens, probs, shared_expert_output
 
         hidden_states, local_tokens, probs, shared_expert_output = forward_func(
             hidden_states=hidden_states,
@@ -573,7 +587,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         )
 
         # Need to record residual to comm stream, since it's created on comp stream
-        node.layer_state.residual.record_stream(torch.cuda.current_stream())
+        node.layer_state.residual.record_stream(cur_platform.current_stream())
 
         # release tensor reference after use
         node.layer_state.residual = None

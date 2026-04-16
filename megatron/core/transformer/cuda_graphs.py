@@ -80,6 +80,10 @@ try:
 except ImportError:
     pass
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 def is_graph_capturing():
     """Query if currently capturing."""
@@ -391,7 +395,7 @@ class _CudagraphGlobalRecord:
                 )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        cur_platform.empty_cache()
 
         _set_capture_start()
         if has_te_modules:
@@ -406,6 +410,11 @@ class _CudagraphGlobalRecord:
                     return "%.1f %s" % (mem_bytes / suffix_bytes, suffix)
             return "%d bytes" % mem_bytes
 
+        time_start = time.time()
+        mem_stats_start = cur_platform.memory_stats()
+        progress_bar = enumerate(cls.cudagraph_record)
+        if HAVE_TQDM:
+            progress_bar = tqdm(progress_bar, "create cuda graphs", total=len(cls.cudagraph_record))
         for g_idx, g in progress_bar:
             if torch.distributed.get_rank() == 0:
                 mem_stats = torch.cuda.memory_stats()
@@ -428,7 +437,7 @@ class _CudagraphGlobalRecord:
 
         # Memory usage.
         time_end = time.time()
-        mem_stats_end = torch.cuda.memory_stats()
+        mem_stats_end = cur_platform.memory_stats()
         capture_stats = {
             "time": time_end - time_start,
             "allocated_bytes": (
@@ -512,7 +521,7 @@ def delete_cuda_graphs():
 
     # TODO: Optional?: Force garbage collection to clean up memory
     gc.collect()
-    torch.cuda.empty_cache()
+    cur_platform.empty_cache()
 
     CudaGraphManager.global_mempool = None
 
@@ -945,6 +954,7 @@ class _CudaGraphRunner(torch.nn.Module):
                 if FREEZE_GC:
                     gc.freeze()
 
+                cur_platform.synchronize()
                 with torch.cuda.graph(
                     self.fwd_graph, pool=self.mempool, capture_error_mode="thread_local"
                 ):
@@ -1061,7 +1071,8 @@ class _CudaGraphRunner(torch.nn.Module):
         if FREEZE_GC:
             gc.freeze()
 
-        with torch.cuda.graph(self.bwd_graph, pool=self.mempool):
+        cur_platform.synchronize()
+        with torch.cuda.graph(self.bwd_graph, pool=self.mempool, capture_error_mode="thread_local"):
             grad_inputs = torch.autograd.grad(
                 outputs=tuple(o for o in self.fwd_graph_output_surface if o.requires_grad),
                 inputs=tuple(i for i in self.fwd_graph_input_surface if i.requires_grad),
@@ -1170,6 +1181,35 @@ class _CudaGraphRunner(torch.nn.Module):
         for o in self.get_tensors(outputs):
             o.cg_buffer_metadata = CudagraphBufferMetadata()
             o.cg_buffer_metadata.is_cudagraph_output = True
+        else:
+            num_dgrads = len(self.static_grad_inputs) - len(list(self.base_module.parameters()))
+            dgrads = self.static_grad_inputs[:num_dgrads]
+            wgrads = self.static_grad_inputs[num_dgrads:]
+
+            wgrads_with_placeholders = []
+            is_dummy_grad = [False] * len(dgrads)
+            for idx, param in enumerate(self.base_module.parameters()):
+                wgrad_is_dummy = getattr(param, "grad_added_to_main_grad", False)
+                if wgrad_is_dummy:
+                    if getattr(param, "zero_out_wgrad", False):
+                        wgrad = torch.zeros(
+                            param.main_grad.shape,
+                            dtype=param.dtype,
+                            device=cur_platform.current_device(),
+                            requires_grad=False,
+                        )
+                    else:
+                        wgrad = torch.empty(
+                            param.main_grad.shape,
+                            dtype=param.dtype,
+                            device=cur_platform.current_device(),
+                            requires_grad=False,
+                        )
+                else:
+                    wgrad = wgrads[idx]
+                wgrads_with_placeholders.append(wgrad)
+                is_dummy_grad.append(wgrad_is_dummy)
+            return tuple(dgrads + wgrads_with_placeholders), is_dummy_grad
 
     def record_graph_capture(self, args, kwargs):
         """Records the data needed to create this runner's forward cudagraph.
@@ -1431,7 +1471,7 @@ class CudaGraphManager(torch.nn.Module):
             CudaGraphManager.global_mempool = torch.cuda.graph_pool_handle()
             # Cudagraph stream capture requires no operations on the default stream prior to the
             # capture, so change to a side stream.
-            torch.cuda.set_stream(torch.cuda.Stream())
+            cur_platform.set_stream(cur_platform.Stream())
 
     def call_ddp_preforward_hook(self, module):
         """Call any DDP pre-forward hooks which are used to launch async data parallel
@@ -2187,7 +2227,7 @@ class TECudaGraphHelper:
 
         torch.distributed.barrier()
         gc.collect()
-        torch.cuda.empty_cache()
+        cur_platform.empty_cache()
         if FREEZE_GC:
             gc.freeze()
 
@@ -2221,7 +2261,7 @@ class TECudaGraphHelper:
         if FREEZE_GC:
             gc.unfreeze()
         gc.collect()
-        torch.cuda.empty_cache()
+        cur_platform.empty_cache()
 
         self._graphs_created = True
 

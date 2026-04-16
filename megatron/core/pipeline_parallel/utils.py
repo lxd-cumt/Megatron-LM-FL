@@ -12,6 +12,10 @@ from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
@@ -154,8 +158,8 @@ class ScheduleNode:
     def __init__(
         self,
         forward_func: Callable,
-        stream: torch.cuda.Stream,
-        event: torch.cuda.Event,
+        stream: cur_platform.Stream,
+        event: cur_platform.Event,
         backward_func: Optional[Callable] = None,
         free_input: bool = False,
         name: str = "schedule_node",
@@ -209,8 +213,8 @@ class ScheduleNode:
 
     def _forward(self, *inputs):
         with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} forward")
-            with torch.cuda.stream(self.stream):
+            cur_platform.range_push(f"{self.name} forward")
+            with cur_platform.stream(self.stream):
                 self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
                 for i, input in enumerate(self.inputs):
                     if input is not None:
@@ -227,7 +231,7 @@ class ScheduleNode:
                     )
 
                 self.output = data
-            torch.cuda.nvtx.range_pop()
+            cur_platform.range_pop()
 
         # Immediately frees input tensors after they are used for nodes
         # where inputs are no longer needed after computation.
@@ -251,8 +255,8 @@ class ScheduleNode:
 
     def _backward(self, *output_grad):
         with stream_acquire_context(self.stream, self.event):
-            torch.cuda.nvtx.range_push(f"{self.name} backward")
-            with torch.cuda.stream(self.stream):
+            cur_platform.range_push(f"{self.name} backward")
+            with cur_platform.stream(self.stream):
                 outputs = self.output
                 if not isinstance(outputs, tuple):
                     outputs = (outputs,)
@@ -261,7 +265,7 @@ class ScheduleNode:
                     f"{len(output_grad)} of {type(output_grad[0])}"
                 )
                 output_grad = self.backward_func(outputs, output_grad)
-            torch.cuda.nvtx.range_pop()
+            cur_platform.range_pop()
 
         # output_grad maybe from another stream
         if output_grad:
@@ -329,9 +333,9 @@ def set_streams(comp_stream=None, comm_stream=None):
         return
 
     if comp_stream is None:
-        comp_stream = torch.cuda.current_stream()
+        comp_stream = cur_platform.current_stream()
     if comm_stream is None:
-        comm_stream = torch.cuda.Stream(device="cuda")
+        comm_stream = cur_platform.Stream(device=cur_platform.device_name())
 
     assert _COMP_STREAM is None
     assert _COMM_STREAM is None

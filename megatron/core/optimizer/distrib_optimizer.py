@@ -36,6 +36,7 @@ except ImportError:
         HAVE_APEX_OR_TE = False
 
 from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
+from megatron.core.parallel_state import get_tensor_model_parallel_group
 
 from .. import tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
@@ -53,10 +54,15 @@ from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor, quantize_param_s
 from ..transformer.fsdp_dtensor_checkpoint import handle_experts_in_state_dict
 from ..transformer.module import MegatronModule
 from .grad_scaler import MegatronGradScaler
+from .muon import Muon, MuonDistMeta
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, param_group_identifier_keys
 from .optimizer_config import OptimizerConfig
 
 logger = getLogger(__name__)
+
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 
 class Range:
@@ -162,6 +168,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 sub_param_start = max(0, gbuf_world_range.start - param_world_start)
                 sub_param_range = param_local_range.normalize(sub_param_start)
                 param_range_map[param] = {
+                    "world_indexes": (param_world_start, param_world_end),
                     "gbuf_world": param_world_range,
                     "gbuf_world_in_bucket": param_world_range_in_bucket,
                     "gbuf_local": param_local_range,
@@ -349,16 +356,35 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_fp32_groups.append(shard_fp32_params_this_group)
             shard_fp32_from_float16_groups.append(shard_fp32_from_float16_params_this_group)
 
+            dist_metas = {}
+
             for model_param in group_range["params"]:
 
                 assert model_param.requires_grad
 
                 gbuf_index, dtype, bucket_index = param_gbuf_map[model_param]
                 gbuf_range = gbuf_ranges[gbuf_index][dtype][bucket_index]
-                param_range = gbuf_range["param_map"][model_param]["param"]
+                # param_range = gbuf_range["param_map"][model_param]["param"]
+                param_gbuf_ranges = gbuf_range["param_map"][model_param]
+                param_range = param_gbuf_ranges["param"]
+
+                # gen dist meta
+                param_world_indexes = param_gbuf_ranges["world_indexes"]
+                tp_split_dim = (
+                    -1
+                    if not getattr(model_param, 'tensor_model_parallel', False)
+                    else getattr(model_param, 'partition_dim')
+                )
+                dist_meta = MuonDistMeta(
+                    gbuf_index, bucket_index, model_param.shape, param_world_indexes, tp_split_dim
+                )
 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                # cuda check -> platform check
+                if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
 
                     # Generate sharded model param.
                     if is_float8tensor(model_param) and config.fp8_recipe != "delayed":
@@ -416,8 +442,14 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_float16_params_this_group.append(shard_model_param)
                     shard_fp32_from_float16_params_this_group.append(shard_main_param)
 
+                    # add to dist metas
+                    dist_metas[shard_main_param] = dist_meta
+
                 # fp32 params.
-                elif model_param.type() == 'torch.cuda.FloatTensor':
+                elif (
+                    model_param.device.type == cur_platform.device_name()
+                    and model_param.dtype == torch.float32
+                ):
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -430,9 +462,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'torch.cuda.FloatTensor,  '
-                        'torch.cuda.HalfTensor, or '
-                        'torch.cuda.BFloat16Tensor. '
+                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                         'Received {}'.format(model_param.type())
                     )
 
@@ -454,7 +484,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_float16_groups,
             shard_fp32_groups,
             shard_fp32_from_float16_groups,
-        )
+        ), dist_metas
 
     def __init__(
         self,
@@ -512,10 +542,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
         assert (
-            isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
+            isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer, Muon))
             or optimizer is None
         ), (
-            "Only Adam and HybridDeviceOptimizer currently supported, "
+            "Only Adam / HybridDeviceOptimizer / Muon currently supported, "
             "due to checkpointing requirements."
         )
 
@@ -579,7 +609,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     # fp32 copy only needed for 16-bit parameters.
-                    if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                    if param.device.type == cur_platform.device_name() and param.dtype in (
+                        torch.float16,
+                        torch.bfloat16,
+                    ):
                         param.main_param = None
                         param.main_param_sharded = True
 
@@ -595,7 +628,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.shard_float16_groups,
             self.shard_fp32_groups,
             self.shard_fp32_from_float16_groups,
-        ) = self._build_model_and_main_param_groups(
+        ), dist_metas = self._build_model_and_main_param_groups(
             self.gbuf_ranges, self.model_param_gbuf_map, self.opt_group_ranges, config
         )
 
@@ -606,6 +639,23 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             self.optimizer.param_groups = [g["orig_group"] for g in self.opt_group_ranges]
             self.optimizer.load_state_dict(self.optimizer.state_dict())
+            # for muon optimizer, enable distributed mode
+            if isinstance(self.optimizer, Muon):
+                assert all(
+                    grad_buffer.grad_dtype == torch.float32 for grad_buffer in self.buffers
+                ), "all grad buffer should only contains float32 type for muon optimizer"
+                gbuf_sizes = [
+                    [(bucket.grad_data.numel(), bucket.offset) for bucket in buffer.buckets]
+                    for buffer in self.buffers
+                ]
+                self.optimizer.enable_distributed_mode(
+                    gbuf_sizes,
+                    self.data_parallel_group,
+                    get_tensor_model_parallel_group(),
+                    dist_metas,
+                )
+
+        self.is_stub_optimizer = False
 
     def _get_model_param_range_map(self, param: torch.nn.Parameter):
         """
@@ -743,6 +793,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     pass
                 elif f"pre_{key}" in param_group:
                     key = f"pre_{key}"
+                elif key == 'use_muon':
+                    param_group[key] = False
+                elif key == 'is_vision_model_param':
+                    param_group[key] = False
                 else:
                     raise ValueError(
                         f"Key {key} (or pre_{key}) not found in param_group {param_group}."
@@ -788,15 +842,31 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=torch.cuda.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
                             #  initialized with the correct dtype.
-                            tensors = {
-                                "exp_avg": init_shard(self.config.exp_avg_dtype),
-                                "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype),
-                            }
+                            # For muon optimizer link state ( for load state dict )
+                            if isinstance(self.optimizer, Muon):
+                                group = self.optimizer.param_groups[group_index]
+                                is_muon_group = group.get("use_muon", False)
+                                if is_muon_group:
+                                    tensors = {"muon_buffer": init_shard(self.config.exp_avg_dtype)}
+                                else:
+                                    tensors = {
+                                        "adamw_exp_avg": init_shard(self.config.exp_avg_dtype),
+                                        "adamw_exp_avg_sq": init_shard(
+                                            self.config.exp_avg_sq_dtype
+                                        ),
+                                    }
+
+                            else:
+                                tensors = {
+                                    "exp_avg": init_shard(self.config.exp_avg_dtype),
+                                    "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype),
+                                }
+
                             if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
                                 if self.config.store_param_remainders and self.config.bf16:
                                     tensors["master_param"] = init_shard(torch.int16)
@@ -906,6 +976,15 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             main_param = self.optimizer.param_groups[group_index]["params"][group_order]
             optim_state = self.optimizer.state[main_param]
             tensors = {"param": main_param, **optim_state}
+        # process muon to be compatiable with adam ( always save to exp_avg / exp_avg_sq )
+        if isinstance(self.optimizer, Muon):
+            use_muon = self.optimizer.param_groups[group_index].get("use_muon", False)
+            if use_muon:
+                tensors["exp_avg"] = tensors["muon_buffer"]
+                tensors["exp_avg_sq"] = torch.zeros_like(tensors["param"])
+            else:
+                tensors["exp_avg"] = tensors["adamw_exp_avg"]
+                tensors["exp_avg_sq"] = tensors["adamw_exp_avg_sq"]
         return tensors
 
     def _set_main_param_and_optimizer_states(self, model_param, tensors):
@@ -935,9 +1014,31 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             main_param = self.optimizer.param_groups[group_index]["params"][group_order]
             optim_state = self.optimizer.state[main_param]
-            dst_tensors = {"param": main_param, **optim_state}
-            for key in dst_tensors:
-                dst_tensors[key].copy_(tensors[key])
+
+            if isinstance(self.optimizer, Muon):
+                if "param" in tensors:
+                    main_param.copy_(tensors["param"])
+                use_muon = self.optimizer.param_groups[group_index].get("use_muon", False)
+                if use_muon:
+                    if "muon_buffer" not in optim_state:
+                        optim_state["muon_buffer"] = torch.zeros_like(main_param)
+                    if "exp_avg" in tensors:
+                        optim_state["muon_buffer"].copy_(tensors["exp_avg"])
+                else:
+                    if "adamw_exp_avg" not in optim_state:
+                        optim_state["adamw_exp_avg"] = torch.zeros_like(main_param)
+                    if "adamw_exp_avg_sq" not in optim_state:
+                        optim_state["adamw_exp_avg_sq"] = torch.zeros_like(main_param)
+                    if "exp_avg" in tensors:
+                        optim_state["adamw_exp_avg"].copy_(tensors["exp_avg"])
+                    if "exp_avg_sq" in tensors:
+                        optim_state["adamw_exp_avg_sq"].copy_(tensors["exp_avg_sq"])
+            else:
+                dst_tensors = {"param": main_param, **optim_state}
+                for key in dst_tensors:
+                    if not key in tensors:
+                        continue
+                    dst_tensors[key].copy_(tensors[key])
 
     def get_parameter_state_dp_reshardable(self):
         """Get internal representation of parameter state without any copies and modifications.
@@ -1074,7 +1175,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device
@@ -1086,7 +1187,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather.
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
+                                send_tensor = send_tensor.to(cur_platform.device())
                             if return_on_all_ranks:
                                 torch.distributed.all_gather(
                                     recv_tensors, send_tensor, data_parallel_group

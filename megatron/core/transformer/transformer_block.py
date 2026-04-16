@@ -1,5 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
@@ -73,7 +74,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    is_dualpipev_first_chunk: Optional[bool] = False,
 ) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
@@ -81,6 +85,7 @@ def get_num_layers_to_build(
         config (TransformerConfig): Configuration object containing transformer model parameters.
         vp_stage (Optional[int]): Virtual pipeline stage number.
         pp_rank (Optional[int]): Pipeline parallel rank.
+        is_dualpipev_first_chunk(Optional[bool]): Is dualpipev first model chunk or not.
 
     Returns:
         int: The number of layers to be built for the current pipeline stage.
@@ -143,7 +148,7 @@ def get_num_layers_to_build(
 
         if is_last_pp_stage and config.num_layers_in_last_pipeline_stage is not None:
             num_layers_per_pipeline_rank = config.num_layers_in_last_pipeline_stage
-    else:
+    elif not config.enable_hetero:
         # Include the embedding layer and loss layer into pipeline parallelism partition
         num_layers = config.num_layers
         if config.account_for_embedding_in_pipeline_split:
@@ -158,7 +163,11 @@ def get_num_layers_to_build(
         num_layers_per_pipeline_rank = num_layers // config.pipeline_model_parallel_size
 
     vp_size = config.virtual_pipeline_model_parallel_size
-    if vp_size is not None and config.pipeline_model_parallel_size > 1:
+    if (
+        vp_size is not None
+        and config.pipeline_model_parallel_size > 1
+        and parallel_state.get_virtual_pipeline_model_parallel_world_size() > 1
+    ):
         # Interleaved pipeline parallelism:
         # Number of layers in each model chunk is the number of layers in the stage,
         # divided by the number of model chunks in a stage.
@@ -178,11 +187,28 @@ def get_num_layers_to_build(
         num_layers_per_virtual_stage = num_layers_per_pipeline_rank // vp_size
 
         num_layers_to_build = num_layers_per_virtual_stage
-
+    ######### FlagScale Begin ########
+    elif config.use_dualpipev:
+        num_layers_per_pipeline_rank_first_chunk = num_layers_per_pipeline_rank // 2
+        if num_layers_per_pipeline_rank % 2 != 0:
+            num_layers_per_pipeline_rank_first_chunk = num_layers_per_pipeline_rank_first_chunk + 1
+        num_layers_per_pipeline_rank_second_chunk = (
+            num_layers_per_pipeline_rank - num_layers_per_pipeline_rank_first_chunk
+        )
+        if is_dualpipev_first_chunk:
+            num_layers_to_build = num_layers_per_pipeline_rank_first_chunk
+        else:
+            num_layers_to_build = num_layers_per_pipeline_rank_second_chunk
+    ######### FlagScale End ########
     else:
         # Non-interleaved pipeline parallelism:
         # Each stage gets a contiguous set of layers.
-        num_layers_to_build = num_layers_per_pipeline_rank
+
+        if config.enable_hetero:
+            pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
+            num_layers_to_build = config.hetero_pipeline_layer_split[pipeline_rank]
+        else:
+            num_layers_to_build = num_layers_per_pipeline_rank
 
     # The embedding (or loss) layer cannot function as a standalone transformer layer
     # Reduce the number of layers to construct by 1 on the first (or last) stage if the
@@ -673,6 +699,17 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             [s, b, h], and optionally the updated context tensor if cross-attention is used.
         """
 
+        ########## FlagScale Begin ##########
+        # for refined recompute
+        self.current_microbatch = -1
+        if (
+            len(self.layers) > 0
+        ):  # some pp-stage has no layers in pipeline_model_parallel_layout,such as embedding stage
+            if hasattr(self.layers[0], 'current_microbatch'):
+                self.current_microbatch = self.layers[0].current_microbatch
+        saved_recompute_granularity = self.config.recompute_granularity
+        ########## FlagScale End ##########
+
         inference_context = deprecate_inference_params(inference_context, inference_params)
         # Remove 'dynamic_inference_decode_only' from kwargs if present
         # this is only used to uniquely identify decode and non-decode cuda graph
@@ -729,6 +766,79 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             use_outer_quantization_context = False
             use_inner_quantization_context = False
             outer_quantization_context = nullcontext()
+        ########## FlagScale Begin ##########
+        if self.config.recompute_method_per_stage_micro_batch != None:
+            if self.config.virtual_pipeline_model_parallel_size != None:
+                if (
+                    self.config.recompute_method_per_stage_micro_batch[
+                        parallel_state.get_virtual_pipeline_model_parallel_rank()
+                        * self.config.pipeline_model_parallel_size
+                        + parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                    == 0
+                ):
+                    self.config.recompute_method = 'uniform'
+                elif (
+                    self.config.recompute_method_per_stage_micro_batch[
+                        parallel_state.get_virtual_pipeline_model_parallel_rank()
+                        * self.config.pipeline_model_parallel_size
+                        + parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                    == 1
+                ):
+                    self.config.recompute_method = 'block'
+                else:
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
+            else:
+                if (
+                    self.config.recompute_method_per_stage_micro_batch[
+                        parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                    == 0
+                ):
+                    self.config.recompute_method = 'uniform'
+                elif (
+                    self.config.recompute_method_per_stage_micro_batch[
+                        parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                    == 1
+                ):
+                    self.config.recompute_method = 'block'
+                else:
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
+            ########## FlagScale End ##########
+        if self.config.recompute_num_layers_per_stage_micro_batch != None:
+            if self.config.virtual_pipeline_model_parallel_size != None:
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_virtual_pipeline_model_parallel_rank()
+                        * self.config.pipeline_model_parallel_size
+                        + parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
+            else:
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
+            if self.config.recompute_num_layers == 0:
+                self.config.recompute_method = None
+                self.config.recompute_granularity = None
+
+        if (
+            self.config.recompute_granularity_per_stage_micro_batch != None
+            and self.config.recompute_granularity_per_stage_micro_batch[
+                parallel_state.get_pipeline_model_parallel_rank()
+            ][self.current_microbatch]
+            == 0
+        ):
+            self.config.recompute_granularity = None
+            self.config.recompute_method = None
 
         with rng_context, outer_quantization_context:
             # Forward pass.
@@ -799,7 +909,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # on the computational graph and will lead to unexpected errors in pipeline schedules.
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
-
+        ########## FlagScale Begin ##########
+        self.config.recompute_granularity = saved_recompute_granularity
+        ########## FlagScale End ##########
         return hidden_states
 
     def sharded_state_dict(

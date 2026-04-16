@@ -78,6 +78,11 @@ if TYPE_CHECKING:
     import wandb as WandbModule
 
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
+
 class ContextOverflowError(Exception):
     """Base exception for when a new request does not fit.
 
@@ -616,7 +621,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Per-request state.
         self.request_ids = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
         )
         # request_query_lengths is the input prompt tokens length during prefill phase (1st step) and then 1 for the decode phase (i.e During generation)
         self.request_query_lengths = torch.empty_like(self.request_ids)
@@ -632,20 +637,20 @@ class DynamicInferenceContext(BaseInferenceContext):
             (self.max_requests, self.max_kv_block_count),
             -1,
             dtype=torch.int,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
         # Track request metadata.
         self.request_metadata = {
             label: torch.empty(
-                (self.max_requests,), dtype=dtype, device=torch.cuda.current_device()
+                (self.max_requests,), dtype=dtype, device=cur_platform.current_device()
             )
             for label, dtype, _ in self.request_metadata_types
         }
 
         # Per-token state.
         self.token_to_input_ids = torch.full(
-            (self.max_tokens,), 0, dtype=torch.long, device=torch.cuda.current_device()
+            (self.max_tokens,), 0, dtype=torch.long, device=cur_platform.current_device()
         )
         self.token_to_pos_ids = torch.full_like(self.token_to_input_ids, 0)
         self.token_to_request_idx = torch.empty_like(self.token_to_input_ids)
@@ -669,7 +674,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                         self.kv_reduced_dim,
                     ),
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
             else:
                 ctx = (
@@ -703,12 +708,12 @@ class DynamicInferenceContext(BaseInferenceContext):
                 self.mamba_conv_states = torch.empty(
                     (self.num_mamba_layers, self.max_requests) + self.mamba_conv_states_shape,
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
                 self.mamba_ssm_states = torch.empty(
                     (self.num_mamba_layers, self.max_requests) + self.mamba_ssm_states_shape,
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
 
             else:
@@ -717,7 +722,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Allocate `ctx_manager`-managed buffers. (For currently unknown reasons,
         # `ctx_manager` can only be used once.)
         ctx_manager = (
-            torch.cuda.use_mem_pool(self.unified_memory_mempool)
+            cur_platform.use_mem_pool(self.unified_memory_mempool)
             if self.unified_memory_level > 0
             else nullcontext()
         )
@@ -1264,7 +1269,9 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Pre-construct shared objects (safe due to deep copy in DynamicInferenceRequest.__post_init__)
         shared_sampling_params = SamplingParams(num_tokens_to_generate=1, termination_id=-1)
-        shared_decode_tokens = torch.zeros(1, dtype=torch.long, device=torch.cuda.current_device())
+        shared_decode_tokens = torch.zeros(
+            1, dtype=torch.long, device=cur_platform.current_device()
+        )
 
         decode_requests = [
             DynamicInferenceRequest(
@@ -1294,7 +1301,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Create a single large tensor and slice from it for each prefill request
         max_prefill_tokens = per_prefill_tokens + (1 if rem_prefill_tokens > 0 else 0)
         shared_prefill_tokens = torch.zeros(
-            max_prefill_tokens, dtype=torch.long, device=torch.cuda.current_device()
+            max_prefill_tokens, dtype=torch.long, device=cur_platform.current_device()
         )
 
         prefill_requests = [
@@ -2210,9 +2217,38 @@ class DynamicInferenceContext(BaseInferenceContext):
             + 1
         ) % self.block_size_tokens
 
-        # 8. We make relevant changes to the token bookkeeping tensors
+        # 8. We resume those requests by assigning blocks and updating bookkeeping tensors
+        if resume_request_count > 0:
+            assert torch.all(
+                self.request_last_kv_block_offset[
+                    self.paused_request_count : (self.paused_request_count + resume_request_count)
+                ]
+                == 0
+            ), "The request_last_kv_block_offset should be 0 for the requests that just got resumed this step. "
+
+            assert resume_request_count <= self.block_allocator.total_avail
+            block_ids = self.block_allocator.allocate_memory_blocks(resume_request_count)
+            row_idx = torch.arange(
+                self.paused_request_count,
+                self.paused_request_count + resume_request_count,
+                device=cur_platform.current_device(),
+            )
+            col_idx = self.request_kv_block_counts[
+                self.paused_request_count : (self.paused_request_count + resume_request_count)
+            ]
+            self.request_to_kv_block_ids[row_idx, col_idx] = block_ids
+            self.request_kv_block_counts[
+                self.paused_request_count : (self.paused_request_count + resume_request_count)
+            ] += 1
+            self.request_last_kv_block_id[
+                self.paused_request_count : (self.paused_request_count + resume_request_count)
+            ] = block_ids
+
+        # 9. We make relevant changes to the token bookkeeping tensors
         self.token_to_request_idx[: self.active_token_count] = torch.arange(
-            self.paused_request_count, self.total_request_count, device=torch.cuda.current_device()
+            self.paused_request_count,
+            self.total_request_count,
+            device=cur_platform.current_device(),
         )
         self.token_to_position_in_request[: self.active_token_count] = (
             self.request_kv_length_offsets[self.paused_request_count : self.total_request_count]

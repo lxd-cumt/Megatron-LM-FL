@@ -37,6 +37,8 @@ from torch.distributed.checkpoint._traverse import OBJ_PATH, traverse_state_dict
 from torch.distributed.checkpoint.metadata import Metadata
 from torch.distributed.checkpoint.planner_helpers import _create_write_items
 
+from megatron.plugin.platform import get_platform
+
 from ...utils import get_torch_version, is_torch_min_version
 from ..core import CheckpointingException
 from ..dict_utils import nested_values
@@ -60,8 +62,10 @@ from .checkpointable import CheckpointableShardedTensor, LocalShardsContainer
 from .filesystem_async import FileSystemWriterAsync
 from .state_dict_saver import save_state_dict_async_finalize, save_state_dict_async_plan
 
+cur_platform = get_platform()
+
 try:
-    if not torch.cuda.is_available():
+    if not cur_platform.is_available():
         raise ImportError
     from transformer_engine.pytorch.float8_tensor import Float8Tensor
 

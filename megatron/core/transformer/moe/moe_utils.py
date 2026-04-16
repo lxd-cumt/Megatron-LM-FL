@@ -18,6 +18,10 @@ from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import internal_api
+from megatron.plugin.platform import get_platform
+from megatron.plugin.utils import reduce_aux_losses_tracker_across_ranks_hetero
+
+cur_platform = get_platform()
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -965,6 +969,7 @@ def track_moe_metrics(
     moe_layer_freq: Optional[Union[int, List[int]]] = None,
     mtp_num_layers: Optional[int] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    enable_hetero=False,
 ) -> None:
     """Track the MoE metrics for logging.
 
@@ -986,20 +991,33 @@ def track_moe_metrics(
                                         Defaults to None.
         pg_collection (ProcessGroupCollection, optional): The process group collection.
                                                           Defaults to None.
+        enable_hetero (bool, optional): Whether to enable hetero. Defaults to False.
     """
     # Aux loss logging
     tracker = get_moe_layer_wise_logging_tracker()
-    # Initialize the tracker if force_initialize is True
+    # Initialize the tracker if force_initialize is True.
+    # The values tensor size must match what the router creates in save_to_aux_losses_tracker,
+    # which uses (num_layers + mtp_num_layers). This is important for PP ranks that have no
+    # MoE layers (so the tracker is empty and force_initialize creates the entry); their tensor
+    # size must match ranks that do have MoE layers, otherwise all_reduce across PP will hang.
+    tracker_num_layers = num_layers
+    if mtp_num_layers is not None:
+        tracker_num_layers += mtp_num_layers
     if force_initialize:
         if track_names is not None:
             for key in track_names:
                 if key not in tracker:
                     tracker[key] = {}
-                    tracker[key]["values"] = torch.zeros(num_layers, device="cuda")
+                    tracker[key]["values"] = torch.zeros(
+                        tracker_num_layers, device=cur_platform.device_name()
+                    )
                     tracker[key]["reduce_group"] = None
                     tracker[key]["avg_group"] = None
                     tracker[key]["reduce_group_has_dp"] = False
-    reduce_aux_losses_tracker_across_ranks(track_names, pg_collection=pg_collection)
+    if not enable_hetero:
+        reduce_aux_losses_tracker_across_ranks(track_names, pg_collection=pg_collection)
+    else:
+        reduce_aux_losses_tracker_across_ranks_hetero(track_names)
 
     # Get number of MoE layers
     if moe_layer_freq is None:
@@ -1095,7 +1113,7 @@ def maybe_move_tensor_to_cpu(
         if as_numpy:
             cpu_tensor = cpu_tensor.numpy()
         if record_stream:
-            tensor.record_stream(torch.cuda.current_stream())
+            tensor.record_stream(cur_platform.current_stream())
         tensor = cpu_tensor
     return tensor
 

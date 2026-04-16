@@ -95,6 +95,10 @@ _fa_version = None
 _mamba_ssm_version = None
 _causal_conv1d_version = None
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 @contextmanager
 def null_decorator(*args, **kwargs):
@@ -331,9 +335,18 @@ def get_te_version():
         else:
             return version("transformer-engine")
 
+    def parse_te_version_str(ver_str):
+        import re
+
+        # Handle versions like "0.1.0+te2.9.0" — extract the part after "+te"
+        match = re.search(r'\+te(\d+\.\d+.*)', ver_str)
+        if match:
+            return match.group(1)
+        return ver_str
+
     global _te_version
     if _te_version is None and HAVE_TE:
-        _te_version = PkgVersion(get_te_version_str())
+        _te_version = PkgVersion(parse_te_version_str(get_te_version_str()))
     return _te_version
 
 
@@ -526,6 +539,10 @@ def get_pg_size(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 1
+    ######### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].size()
+    ######### FlagScale End #########
     return group.size()
 
 
@@ -540,6 +557,10 @@ def get_pg_rank(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 0
+    ########### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].rank()
+    ########### FlagScale End #########
     return group.rank()
 
 
@@ -628,7 +649,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                     requires_grad=False,
                 )
 
@@ -895,7 +916,7 @@ def check_param_hashes_across_dp_replicas(
         assert len(params) == len(local_param_hashes)
         if len(params) == 0:
             continue
-        local_param_hashes = torch.stack(local_param_hashes).cuda()
+        local_param_hashes = torch.stack(local_param_hashes).to(cur_platform.device())
         all_param_hashes = [
             torch.zeros_like(local_param_hashes) for _ in range(all_gather_group.size())
         ]
@@ -1204,7 +1225,7 @@ def local_multi_tensor_l2_norm(chunk_size, noop_flag, tensor_lists, per_tensor, 
     """
     l2 = [[(torch.norm(tensor)) for tensor in tensor_list] for tensor_list in tensor_lists]
     l2_reduced = torch.norm(torch.tensor(l2))
-    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float, device="cuda")
+    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float).to(cur_platform.device())
     return l2_cuda, None
 
 
@@ -1394,10 +1415,10 @@ class StragglerDetector:
         self.bdata: bool = False
         self.dev: Union[torch.device, int, None] = None
         self.evt_q: Union[queue.LifoQueue, None] = None
-        self.start_gemm_ev: List[torch.cuda.Event] = []
-        self.stop_gemm_ev: List[torch.cuda.Event] = []
-        self.start_data_ev: List[torch.cuda.Event] = []
-        self.stop_data_ev: List[torch.cuda.Event] = []
+        self.start_gemm_ev: List[cur_platform.Event] = []
+        self.stop_gemm_ev: List[cur_platform.Event] = []
+        self.start_data_ev: List[cur_platform.Event] = []
+        self.stop_data_ev: List[cur_platform.Event] = []
         self.start_gemm_tm: List[int] = []
         self.stop_gemm_tm: List[int] = []
         self.start_data_tm: List[int] = []
@@ -1447,7 +1468,7 @@ class StragglerDetector:
         self.stop = self.null_method
         self._off = True
         # No CUDA, No Support
-        if torch.cuda.is_available():
+        if cur_platform.is_available():
             self._off = not enabled
             self.world = world
             self.rank = rank
@@ -1467,12 +1488,12 @@ class StragglerDetector:
             self.stop_data_tm = []
             backend = torch.distributed.get_backend()
             if backend == "nccl":
-                self.dev = torch.cuda.current_device()
+                self.dev = cur_platform.current_device()
             else:
                 self.dev = torch.device("cpu")
             # cache some events
             for _ in range(prefill):
-                self.evt_q.put(torch.cuda.Event(enable_timing=True))
+                self.evt_q.put(cur_platform.Event(enable_timing=True))
             if self.rank == 0:
                 # Start the controller
                 self._controller()
@@ -1517,8 +1538,8 @@ class StragglerDetector:
             sev = self.evt_q.get()  # no try-catch
             eev = self.evt_q.get()  # no try-catch
         else:
-            sev = torch.cuda.Event(enable_timing=True)
-            eev = torch.cuda.Event(enable_timing=True)
+            sev = cur_platform.Event(enable_timing=True)
+            eev = cur_platform.Event(enable_timing=True)
         # First check if this start is for data
         if self.bdata:
             self.start_data_ev.append(sev)
@@ -1589,11 +1610,11 @@ class StragglerDetector:
         elif ls_bs != ls_be:
             logger.warning(f"get_batch Start/Stop out of sync {ls_bs}/{ls_be}")
         else:
-            temp = torch.cuda.temperature()
-            power = torch.cuda.power_draw()
-            util = torch.cuda.utilization()
-            clock = torch.cuda.clock_rate()
-            torch.cuda.synchronize()
+            temp = cur_platform.temperature()
+            power = cur_platform.power_draw()
+            util = cur_platform.utilization()
+            clock = cur_platform.clock_rate()
+            cur_platform.synchronize()
             # Process Events
             for i in range(ls_ev):
                 e_ev = self.start_gemm_ev[i].elapsed_time(self.stop_gemm_ev[i])
@@ -2183,7 +2204,7 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     _nvtx_range_messages.append(msg)
 
     # Push NVTX range
-    torch.cuda.nvtx.range_push(msg)
+    cur_platform.range_push(msg)
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2212,7 +2233,7 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
         )
 
     # Pop NVTX range
-    torch.cuda.nvtx.range_pop()
+    cur_platform.range_pop()
 
 
 @lru_cache(maxsize=None)

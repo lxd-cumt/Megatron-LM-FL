@@ -15,6 +15,7 @@ from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatr
 from megatron.core.datasets.megatron_dataset import MegatronDataset
 from megatron.core.datasets.utils import normalize
 from megatron.core.utils import log_single_rank
+from megatron.plugin.utils import is_built_on_zero_rank
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ class BlendedDataset(torch.utils.data.Dataset):
         else:
             cache_hit = False
 
-        if not path_to_cache or (not cache_hit and torch.distributed.get_rank() == 0):
+        if not path_to_cache or (not cache_hit and is_built_on_zero_rank()):
             log_single_rank(
                 logger, logging.INFO, f"Build and save the {type(self).__name__} indices"
             )

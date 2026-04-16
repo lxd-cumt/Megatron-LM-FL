@@ -35,9 +35,16 @@ from megatron.core.utils import (
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 def get_transformer_layer_offset(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    is_dualpipev_first_chunk: Optional[bool] = False,
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
     if pp_rank is None:
@@ -46,8 +53,9 @@ def get_transformer_layer_offset(
     is_first_pp_stage = pp_rank == 0
 
     if config.pipeline_model_parallel_size > 1:
-
-        if config.pipeline_model_parallel_layout:
+        if config.enable_hetero:
+            offset = sum(([0] + config.hetero_pipeline_layer_split)[: pp_rank + 1])
+        elif config.pipeline_model_parallel_layout:
             offset = config.pipeline_model_parallel_layout.get_layer_offset(
                 layer_type=LayerType.decoder, vp_stage=vp_stage
             )
@@ -144,12 +152,97 @@ def get_transformer_layer_offset(
                 else:
                     num_layers_per_pipeline_rank = 0
 
-                if pp_rank == 0:
-                    offset = 0
+                if not config.use_dualpipev:
+                    if pp_rank == 0:
+                        offset = 0
+                    else:
+                        offset = (
+                            middle_pipeline_rank * num_layers_per_pipeline_rank
+                        ) + num_layers_in_first_pipeline_stage
+                ######### FlagScale Begin ########
                 else:
-                    offset = (
-                        middle_pipeline_rank * num_layers_per_pipeline_rank
-                    ) + num_layers_in_first_pipeline_stage
+                    # for dualpipev
+                    num_layers_in_first_pipeline_stage_first_chunk = (
+                        num_layers_in_first_pipeline_stage // 2
+                    )
+                    if num_layers_in_first_pipeline_stage % 2 != 0:
+                        num_layers_in_first_pipeline_stage_first_chunk = (
+                            num_layers_in_first_pipeline_stage_first_chunk + 1
+                        )
+                    num_layers_in_first_pipeline_stage_second_chunk = (
+                        num_layers_in_first_pipeline_stage
+                        - num_layers_in_first_pipeline_stage_first_chunk
+                    )
+
+                    num_layers_in_last_pipeline_stage_first_chunk = (
+                        num_layers_in_last_pipeline_stage // 2
+                    )
+                    if num_layers_in_last_pipeline_stage % 2 != 0:
+                        num_layers_in_last_pipeline_stage_first_chunk = (
+                            num_layers_in_last_pipeline_stage_first_chunk + 1
+                        )
+                    num_layers_in_last_pipeline_stage_second_chunk = (
+                        num_layers_in_last_pipeline_stage
+                        - num_layers_in_last_pipeline_stage_first_chunk
+                    )
+
+                    num_layers_per_pipeline_rank_first_chunk = num_layers_per_pipeline_rank // 2
+                    if num_layers_per_pipeline_rank % 2 != 0:
+                        num_layers_per_pipeline_rank_first_chunk = (
+                            num_layers_per_pipeline_rank_first_chunk + 1
+                        )
+                    num_layers_per_pipeline_rank_second_chunk = (
+                        num_layers_per_pipeline_rank - num_layers_per_pipeline_rank_first_chunk
+                    )
+
+                    # process first chunk
+                    if is_dualpipev_first_chunk:
+                        middle_pipeline_rank = (
+                            pp_rank
+                            if config.num_layers_in_first_pipeline_stage is None
+                            else pp_rank - 1
+                        )
+                        if pp_rank == 0:
+                            offset = 0
+                        else:
+                            offset = (
+                                middle_pipeline_rank * num_layers_per_pipeline_rank_first_chunk
+                            ) + num_layers_in_first_pipeline_stage_first_chunk
+
+                    # process second chunk
+                    else:
+                        start_offset = (
+                            config.pipeline_model_parallel_size
+                            * num_layers_per_pipeline_rank_first_chunk
+                        )
+                        if num_layers_in_first_pipeline_stage_first_chunk > 0:
+                            start_offset = (
+                                start_offset
+                                - num_layers_per_pipeline_rank_first_chunk
+                                + num_layers_in_first_pipeline_stage_first_chunk
+                            )
+                        if num_layers_in_last_pipeline_stage_first_chunk > 0:
+                            start_offset = (
+                                start_offset
+                                - num_layers_per_pipeline_rank_first_chunk
+                                + num_layers_in_last_pipeline_stage_first_chunk
+                            )
+
+                        middle_pipeline_rank = (
+                            config.pipeline_model_parallel_size - 1 - pp_rank
+                            if config.num_layers_in_last_pipeline_stage is None
+                            else config.pipeline_model_parallel_size - 1 - pp_rank - 1
+                        )
+
+                        if pp_rank == config.pipeline_model_parallel_size - 1:
+                            offset = start_offset
+                        else:
+                            offset = (
+                                start_offset
+                                + (middle_pipeline_rank * num_layers_per_pipeline_rank_second_chunk)
+                                + num_layers_in_last_pipeline_stage_second_chunk
+                            )
+                ######### FlagScale End ########
         else:
             num_layers = config.num_layers
 
@@ -181,13 +274,32 @@ def get_transformer_layer_offset(
                 ):
                     offset -= 1
             else:
-                offset = pp_rank * num_layers_per_pipeline_rank
+                if not config.use_dualpipev:
+                    offset = pp_rank * num_layers_per_pipeline_rank
 
-                # Reduce the offset of embedding layer from the total layer number
-                if config.account_for_embedding_in_pipeline_split and not (
-                    is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage
-                ):
-                    offset -= 1
+                    # Reduce the offset of embedding layer from the total layer number
+                    if config.account_for_embedding_in_pipeline_split and not (
+                        is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage
+                    ):
+                        offset -= 1
+                ######### FlagScale Begin ########
+                else:
+                    num_layers_per_pipeline_rank_first_chunk = num_layers_per_pipeline_rank // 2
+                    if num_layers_per_pipeline_rank % 2 != 0:
+                        num_layers_per_pipeline_rank_first_chunk = (
+                            num_layers_per_pipeline_rank_first_chunk + 1
+                        )
+                    num_layers_per_pipeline_rank_second_chunk = (
+                        num_layers_per_pipeline_rank - num_layers_per_pipeline_rank_first_chunk
+                    )
+
+                    if is_dualpipev_first_chunk:
+                        offset = pp_rank * num_layers_per_pipeline_rank_first_chunk
+                    else:
+                        offset = config.num_layers - (
+                            (pp_rank + 1) * num_layers_per_pipeline_rank_second_chunk
+                        )
+                ######### FlagScale End ########
     else:
         offset = 0
     return offset
@@ -933,7 +1045,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             slen_per_cp = seq_length // self.config.context_parallel_size
             static_inputs["attention_mask"] = (
                 ~(torch.tril(torch.ones((slen_per_cp, seq_length))).bool())
-                .to(torch.cuda.current_device())
+                .to(cur_platform.current_device())
                 .reshape(1, 1, slen_per_cp, seq_length)
                 .tile(micro_batch_size, 1, 1, 1)
             )
@@ -1144,7 +1256,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 return torch.zeros(
                     (micro_batch_size, 1, slen_per_cp, slen),
                     dtype=torch.bool,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
 
             if not is_te_min_version("1.10.0"):
