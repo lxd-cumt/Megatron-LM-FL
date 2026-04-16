@@ -133,7 +133,7 @@ class BlockAllocator:
         # requests will point to each other's memory blocks, resulting in faulty
         # generations.
         self.block_bag = torch.arange(
-            self.total_count, dtype=torch.int32, device=torch.cuda.current_device()
+            self.total_count, dtype=torch.int32, device=cur_platform.current_device()
         )
 
         self.total_avail = self.total_count - 1

@@ -15,6 +15,10 @@ import torch
 import triton
 import triton.language as tl
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 __all__ = [
     "set_batch_invariant_mode",
     "is_batch_invariant_mode_enabled",
@@ -149,7 +153,7 @@ def get_compute_units():
     # Use match/case for device-specific logic (Python 3.10+)
     match device_type:
         case "cuda":
-            device_properties = torch.cuda.get_device_properties(0)
+            device_properties = cur_platform.get_device_properties(0)
             NUM_SMS = device_properties.multi_processor_count
         case "xpu":
             device_properties = torch.xpu.get_device_properties(0)

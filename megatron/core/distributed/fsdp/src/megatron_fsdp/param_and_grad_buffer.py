@@ -1771,9 +1771,9 @@ class ParamAndGradBuffer:
         self.already_registered = True
 
         global NCCL_MEMORY_POOL
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         torch.distributed.barrier(async_op=False)
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
 
         for group in self.ubr_groups:
             log_single_rank(

@@ -15,6 +15,9 @@ from typing import List, Optional, Tuple
 import torch
 
 from megatron.core.utils import get_pg_size
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 
 @dataclass(order=True, frozen=True)
@@ -185,7 +188,7 @@ class InferenceBatchDimensions:
                 int(has_explicit_chunked_prefill_req),
             ],
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
         torch.distributed.all_reduce(sync_tensor, op=torch.distributed.ReduceOp.MAX, group=ep_group)

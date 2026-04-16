@@ -940,11 +940,11 @@ class _CudaGraphRunner(torch.nn.Module):
             _set_warmup_end()
 
             with self.get_quantization_context():
-                torch.cuda.synchronize()
+                cur_platform.synchronize()
                 # Register default CUDA generators ourselves (fixed in-place to have normal tensors)
                 # before capture begins, to avoid inference-tensor state issues during capture.
                 with torch.inference_mode(mode=False):
-                    for device_idx in range(torch.cuda.device_count()):
+                    for device_idx in range(cur_platform.device_count()):
                         default_gen = torch.cuda.default_generators[device_idx]
                         self.fwd_graph.register_generator_state(
                             _ensure_generator_state_is_cudagraph_safe(default_gen)

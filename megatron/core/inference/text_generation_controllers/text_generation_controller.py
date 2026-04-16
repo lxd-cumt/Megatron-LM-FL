@@ -28,6 +28,9 @@ from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.inference.utils import get_attention_mask, set_decode_expert_padding
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.moe_layer import BaseMoELayer
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 from megatron.core.transformer.utils import set_model_to_sequence_parallel
 from megatron.core.utils import get_asyncio_loop, get_model_config, unwrap_model
 
@@ -72,7 +75,7 @@ class TextGenerationController:
         )
 
         model_config = get_model_config(self.inference_wrapped_model.model)
-        self.sampling_rng = torch.Generator(device=torch.cuda.current_device())
+        self.sampling_rng = torch.Generator(device=cur_platform.current_device())
         self.sampling_rng.manual_seed(model_config.inference_sampling_seed)
 
         if self.inference_wrapped_model.inference_context.is_dynamic_batching():
@@ -97,7 +100,7 @@ class TextGenerationController:
         # Callback to get request IDs that should be marked as finished due to stop words
         self._get_stop_word_finished_ids_callback = None
 
-        device = torch.cuda.current_device()
+        device = cur_platform.current_device()
         logits_dtype = self.inference_wrapped_model.inference_wrapper_config.params_dtype
         # Use padded vocab size because tokenizer vocab size might pad to nearest power of 2.
         vocab_size = self.inference_wrapped_model.inference_wrapper_config.padded_vocab_size
@@ -473,7 +476,7 @@ class TextGenerationController:
             [self.tokenizer.eod] * padded_sequence_length for _ in range(num_padded_requests)
         ]
 
-        tokens = torch.tensor(padded_prompt_tokens_list, device=torch.cuda.current_device())
+        tokens = torch.tensor(padded_prompt_tokens_list, device=cur_platform.current_device())
 
         return tokens
 
@@ -996,7 +999,7 @@ class TextGenerationController:
         )
         prompt_lengths_in_batch = torch.tensor(
             [len(prompt_tokens) for prompt_tokens in batch_prompt_tokens_list],
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         max_prompt_length_in_batch = max(prompt_lengths_in_batch)
         min_prompt_length_in_batch = min(prompt_lengths_in_batch)
@@ -1053,17 +1056,17 @@ class TextGenerationController:
             output_log_probs = torch.empty(
                 (batch_size, max_sequence_length - 1),
                 dtype=torch.float32,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
 
         # An array to check which of the prompts have reached end of generation condition
         is_generation_done_tensor = torch.zeros(
-            batch_size, dtype=torch.bool, device=torch.cuda.current_device()
+            batch_size, dtype=torch.bool, device=cur_platform.current_device()
         )
 
         # An array to act as a counter to keep track of generated sequence lengths
         generated_sequence_lengths = torch.zeros(
-            batch_size, device=torch.cuda.current_device()
+            batch_size, device=cur_platform.current_device()
         ).cuda()
 
         # Use padded vocab size because tokenizer vocab size might not include padding
@@ -1160,7 +1163,7 @@ class TextGenerationController:
             while True:
                 # Add a timing event at the start of each iteration. The token generation
                 # time will be the elapsed time between consective timing events.
-                timing_events.append(torch.cuda.Event(enable_timing=True))
+                timing_events.append(cur_platform.Event(enable_timing=True))
                 timing_events[-1].record()
 
                 # Pick the context window that we need to pass through the network.
@@ -1334,7 +1337,7 @@ class TextGenerationController:
                     break
 
         # Add a final timing event to compute the latency of every loop iteration
-        timing_events.append(torch.cuda.Event(enable_timing=True))
+        timing_events.append(cur_platform.Event(enable_timing=True))
         timing_events[-1].record()
 
         # Close all streams

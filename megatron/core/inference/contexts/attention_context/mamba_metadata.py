@@ -46,7 +46,7 @@ class MambaMetadata:
         """
         self.max_requests = max_requests
         self.max_tokens = max_tokens
-        self.device = torch.cuda.current_device()
+        self.device = cur_platform.current_device()
 
         # Map from requests to slots in the static Mamba state buffer
         self.request_to_mamba_state_idx = torch.full(

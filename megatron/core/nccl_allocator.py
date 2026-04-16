@@ -169,7 +169,7 @@ def register_mem_pool(pool, group, symmetric=True):
     Register a memory pool to a group.
     symmetric: bool, this is for future use.
     """
-    backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+    backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))
     if symmetric:
         try:
             backend.register_mem_pool(pool, symm=symmetric)
@@ -190,7 +190,7 @@ def deregister_mem_pool(pool, group):
     """
     Deregister a memory pool from a group.
     """
-    backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+    backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))
     if pool.snapshot():
         backend.deregister_mem_pool(pool)
 

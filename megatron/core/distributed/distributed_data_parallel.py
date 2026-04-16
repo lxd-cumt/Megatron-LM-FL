@@ -639,13 +639,13 @@ class DistributedDataParallel(_BaseDataParallel):
             empty_cache: Whether to call torch.cuda.empty_cache() after freeing.
         """
         if synchronize:
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
 
         for buffer in self.buffers + self.expert_parallel_buffers:
             buffer.offload_to_cpu(move_params=False, move_grads=True)
 
         if empty_cache:
-            torch.cuda.empty_cache()
+            cur_platform.empty_cache()
 
     def restore_grad_buffers(self, synchronize: bool = True) -> None:
         """
@@ -662,4 +662,4 @@ class DistributedDataParallel(_BaseDataParallel):
             buffer.reload_from_cpu(move_params=False, move_grads=True)
 
         if synchronize:
-            torch.cuda.synchronize()
+            cur_platform.synchronize()

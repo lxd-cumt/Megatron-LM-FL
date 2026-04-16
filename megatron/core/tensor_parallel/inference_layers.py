@@ -17,6 +17,9 @@ from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import get_global_symmetric_memory_buffer
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 try:
     import transformer_engine.pytorch.cpp_extensions as tex
@@ -119,7 +122,7 @@ class InferenceLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         # 1. check if bf16
         is_bf16 = x.dtype == torch.bfloat16
         # 2. check if hopper or newer
-        is_hopper_or_newer = torch.cuda.get_device_properties(x.device).major >= 9
+        is_hopper_or_newer = cur_platform.get_device_properties(x.device).major >= 9
         # 3. check if symmetric memory buffer is available
         has_enough_symmetric_memory = symm_mem_buffer["handle"] is not None
         can_use_custom_nvls_collectives = (
@@ -219,7 +222,7 @@ class InferenceRowParallelLinear(TERowParallelLinear):
         # 1. check if bf16
         is_bf16 = x.dtype == torch.bfloat16
         # 2. check if hopper
-        is_hopper_or_newer = torch.cuda.get_device_properties(x.device).major >= 9
+        is_hopper_or_newer = cur_platform.get_device_properties(x.device).major >= 9
         # 3. attempt to ask for symmetric memory
         symm_mem_buffer_dims = list(x.size())
         symm_mem_buffer_dims[-1] = self.weight.size(0)

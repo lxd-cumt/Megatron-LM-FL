@@ -337,7 +337,7 @@ def prefetch_managed_tensor(tensor, *, device: int, stream=None) -> None:
     lib = _get_ctypes_lib()
     nbytes = tensor.nbytes
     if stream is None:
-        stream = torch.cuda.current_stream()
+        stream = cur_platform.current_stream()
     # torch.cuda.Stream exposes a cuda_stream integer handle.
     stream_ptr = ctypes.c_void_p(int(stream.cuda_stream))
     err = lib.managed_prefetch(
@@ -429,7 +429,7 @@ def prefetch_managed_module_parameters(
     # Avoid duplicate prefetch on shared tensors.
     seen_ptrs: set[int] = set()
     total_nbytes = 0
-    stream = torch.cuda.current_stream()
+    stream = cur_platform.current_stream()
 
     for name, p in module.named_parameters(recurse=True):
         if p is None:

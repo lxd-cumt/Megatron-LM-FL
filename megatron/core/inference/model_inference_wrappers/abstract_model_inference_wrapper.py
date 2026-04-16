@@ -174,10 +174,10 @@ class AbstractModelInferenceWrapper(abc.ABC):
         # so that the dummy forward pass will work with sequence parallel
         num_dummy_tokens = self.tp_size
         tokens = torch.zeros(
-            (1, num_dummy_tokens), dtype=torch.long, device=torch.cuda.current_device()
+            (1, num_dummy_tokens), dtype=torch.long, device=cur_platform.current_device()
         )
         position_ids = torch.zeros(
-            (1, num_dummy_tokens), dtype=torch.long, device=torch.cuda.current_device()
+            (1, num_dummy_tokens), dtype=torch.long, device=cur_platform.current_device()
         )
         attention_mask = None
         return self.model(tokens, position_ids, attention_mask)

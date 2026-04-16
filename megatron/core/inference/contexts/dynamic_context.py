@@ -458,7 +458,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # (i.e., divergence in the scheduling behavior).
         if pp_size > 1:
             block_count_tensor = torch.tensor(
-                block_count, dtype=torch.int32, device=torch.cuda.current_device()
+                block_count, dtype=torch.int32, device=cur_platform.current_device()
             )
             torch.distributed.all_reduce(
                 block_count_tensor,
@@ -694,7 +694,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                             self.hidden_size_per_attention_head,
                         ),
                         dtype=self.params_dtype,
-                        device=torch.cuda.current_device(),
+                        device=cur_platform.current_device(),
                     )
 
         # Optional state tensors for hybrid models
@@ -1190,7 +1190,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         self.request_kv_block_counts[request_slice] = block_counts
         for i, (label, dtype, _) in enumerate(self.request_metadata_types):
             self.request_metadata[label][request_slice] = torch.tensor(
-                metadata_cols[i], dtype=dtype, device=torch.cuda.current_device()
+                metadata_cols[i], dtype=dtype, device=cur_platform.current_device()
             )
 
         dummy_block_idx = self.block_allocator.dummy_block_idx
@@ -1845,7 +1845,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             row_idx = torch.arange(
                 self.paused_request_count,
                 self.paused_request_count + resume_request_count,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
             col_idx = self.request_kv_block_counts[
                 self.paused_request_count : (self.paused_request_count + resume_request_count)
@@ -1913,7 +1913,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             -1,
             -1,
             dtype=paused_block_counts_cumsum.dtype,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         net_block_counts = paused_block_counts_cumsum - remaining_paused_request_counts
         evict_request_count = torch.nonzero(net_block_counts >= 0)[0].item() + 1
@@ -1922,7 +1922,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         evict_start_idx = self.paused_request_count - evict_request_count
         evict_end_idx = self.paused_request_count
         evict_request_idxs = torch.arange(
-            evict_start_idx, evict_end_idx, device=torch.cuda.current_device()
+            evict_start_idx, evict_end_idx, device=cur_platform.current_device()
         )
         evict_request_ids = self.request_ids[evict_start_idx:evict_end_idx].clone()
 
@@ -1936,24 +1936,24 @@ class DynamicInferenceContext(BaseInferenceContext):
             src_idxs = torch.arange(
                 self.paused_request_count - evict_request_count,
                 self.paused_request_count,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
             dst_idxs = torch.arange(
                 self.total_request_count - evict_request_count,
                 self.total_request_count,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
         else:
             # Swap all active requests with left-most evicted requests.
             src_idxs = torch.arange(
                 self.paused_request_count - evict_request_count,
                 self.paused_request_count - evict_request_count + active_request_count,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
             dst_idxs = torch.arange(
                 self.paused_request_count,
                 self.paused_request_count + active_request_count,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
 
         # Swap evicted and active requests.
