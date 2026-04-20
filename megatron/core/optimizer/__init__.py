@@ -1,13 +1,13 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+import copy
 import logging
 import warnings
+from dataclasses import astuple
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.optim import SGD as CPUSGD
 from torch.optim import AdamW as CPUAdam
-
-from .muon import Muon
 
 try:
     from transformer_engine.pytorch.optimizers import FusedAdam as Adam
@@ -91,6 +91,9 @@ def get_standard_config_overrides(config: OptimizerConfig) -> Dict[ParamKey, Par
         Dict[ParamKey, ParamGroupOverride]: standard config overrides.
     """
     config_overrides: Optional[Dict[ParamKey, ParamGroupOverride]] = {}
+    # First, figure out how we are going to do wd skipping. The two main approaches are:
+    #  1. The classic megatron approach of skipping all len 1 and bias parameters.
+    #  2. The Qwen3-Next approach of doing 1, other than qk layernorm parameters.
     if config.apply_wd_to_qk_layernorm:
         shape_1_not_qkln_param = ParamWithNamePredicate(
             name="s1_not_qkln",
@@ -459,6 +462,7 @@ def _get_megatron_optimizer_based_on_param_groups(
     data_parallel_group_idx: Optional[int] = None,
     intra_dist_opt_group: Optional[torch.distributed.ProcessGroup] = None,
     distributed_optimizer_instance_id: Optional[int] = 0,
+    pg_collection: Optional[ProcessGroupCollection] = None,
 ) -> MegatronOptimizer:
     """Get Megatron optimizer based on parameter groups.
 
@@ -609,29 +613,6 @@ def _get_megatron_optimizer_based_on_param_groups(
                 momentum=config.sgd_momentum,
             )
             init_state_fn = None
-        elif config.optimizer == 'muon':
-            optimizer = Muon(
-                param_groups,
-                lr=config.lr,
-                weight_decay=config.weight_decay,
-                matched_adamw_rms=config.muon_matched_adamw_rms,
-                momentum=config.muon_momentum,
-                nesterov=config.muon_nesterov,
-                ns_steps=config.muon_ns_steps,
-                adamw_betas=(config.adam_beta1, config.adam_beta2),
-                adamw_eps=config.adam_eps,
-            )
-
-            def init_state_fn(opt, config=None):
-                for group in opt.param_groups:
-                    for p in group['params']:
-                        if len(opt.state[p]) == 0:
-                            if config is None or not config.use_precision_aware_optimizer:
-                                opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
-                                opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
-                            else:
-                                opt.initialize_state(p)
-
         else:
             raise Exception('{} optimizer is not supported.'.format(config.optimizer))
     else:
@@ -691,7 +672,41 @@ def _get_megatron_optimizer_based_on_param_groups(
         optimizer = FP32Optimizer(optimizer, config, init_state_fn)
         setattr(optimizer, 'grad_stats_parallel_group', model_parallel_group)
 
+    if pg_collection is None or not hasattr(pg_collection, 'tp'):
+        tp_group = parallel_state.get_tensor_model_parallel_group()
+    else:
+        tp_group = pg_collection.tp
+    # TODO(M4): plumb tp_group through optimizer constructors so this setattr disappears.
+    setattr(optimizer, 'tp_group', tp_group)
+
     return optimizer
+
+
+def check_config_overrides_consistency(
+    config: OptimizerConfig, config_overrides: Optional[Dict[ParamKey, ParamGroupOverride]]
+):
+    """Check if the config overrides are consistent with the config."""
+
+    # TODO: Remove `optimizer` from this eventually (e.g., if we use Muon for some layers and
+    # Adam for other layers). This would need some more refactoring to work though (param_groups
+    # filtered by optimizer passed into _get_megatron_optimizer_based_on_param_groups).
+    if config_overrides is not None:
+        fields_to_check_for_consistency = [
+            'overlap_param_gather_with_optimizer_step',
+            'optimizer',
+            'optimizer_cpu_offload',
+        ]
+        for field_name in fields_to_check_for_consistency:
+            base_field = getattr(config, field_name, None)
+            all_config_overrides = list(config_overrides.values())
+            for config_override in all_config_overrides:
+                if field_name in config_override:
+                    field = config_override[field_name]
+                    if field != base_field:
+                        raise ValueError(
+                            f"Field {field_name} should not be overriden in a config override."
+                        )
+    return True
 
 
 def get_megatron_optimizer(
@@ -723,35 +738,7 @@ def get_megatron_optimizer(
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
 
-    # TODO: Remove `optimizer` from this eventually (e.g., if we use Muon for some layers and
-    # Adam for other layers). This would need some more refactoring to work though (param_groups
-    # filtered by optimizer passed into _get_megatron_optimizer_based_on_param_groups).
-    if config_overrides is not None:
-        fields_to_check_for_consistency = [
-            'overlap_param_gather_with_optimizer_step',
-            'optimizer',
-            'optimizer_cpu_offload',
-        ]
-        for field_name in fields_to_check_for_consistency:
-            base_field = getattr(config, field_name, None)
-            all_config_overrides = list(config_overrides.values())
-            for config_override in all_config_overrides:
-                # Handle both OptimizerConfig (old style) and ParamGroupOverride (new style)
-                if isinstance(config_override, dict):
-                    # ParamGroupOverride: check if field is in dict
-                    if field_name in config_override:
-                        field = config_override[field_name]
-                        if field != base_field:
-                            raise ValueError(
-                                f"Field {field_name} should not be overriden in a config override."
-                            )
-                else:
-                    # OptimizerConfig: use getattr
-                    field = getattr(config_override, field_name, None)
-                    if field != base_field:
-                        raise ValueError(
-                            f"Field {field_name} in config_override does not match base config."
-                        )
+    check_config_overrides_consistency(config, config_overrides)
 
     # Separate out first model chunk if overlapping param AG with optimizer step.
     if config.overlap_param_gather_with_optimizer_step:
@@ -762,30 +749,26 @@ def get_megatron_optimizer(
         overlap_param_gather_with_optimizer_step_flags = [False]
 
     # Setup process groups using helper method
-    process_groups = ProcessGroupCollection.setup_process_groups_for_optimizer(
+    process_groups_dict = ProcessGroupCollection.setup_process_groups_for_optimizer(
         pg_collection, model_chunks, use_gloo_process_groups
     )
 
-    dp_cp_group = process_groups['dp_cp_group']
-    intra_dp_cp_group = process_groups['intra_dp_cp_group']
-    intra_expt_dp_group = process_groups['intra_expt_dp_group']
-    mp_group = process_groups['mp_group']
-    ########## FlagScale Begin ##########
-    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
-    model_parallel_rank = mp_group[0].rank()
-    engram_dp_group = process_groups['engram_dp_group']
-    engram_mp_group = process_groups['engram_mp_group']
-    engram_dp_group_gloo = process_groups['engram_dp_group_gloo']
-    ########## FlagScale End ##########
-    expt_tp_pp_group = process_groups['expt_tp_pp_group']
-    intra_dp_cp_group_gloo = process_groups['intra_dp_cp_group_gloo']
-    intra_expt_dp_group_gloo = process_groups['intra_expt_dp_group_gloo']
-    intra_dist_opt_group = process_groups['intra_dist_opt_group']
+    dp_cp_group = process_groups_dict['dp_cp_group']
+    intra_dp_cp_group = process_groups_dict['intra_dp_cp_group']
+    intra_expt_dp_group = process_groups_dict['intra_expt_dp_group']
+    mp_group = process_groups_dict['mp_group']
+    expt_tp_pp_group = process_groups_dict['expt_tp_pp_group']
+    intra_dp_cp_group_gloo = process_groups_dict['intra_dp_cp_group_gloo']
+    intra_expt_dp_group_gloo = process_groups_dict['intra_expt_dp_group_gloo']
+    intra_dist_opt_group = process_groups_dict['intra_dist_opt_group']
+    engram_dp_group = process_groups_dict['engram_dp_group']
+    engram_mp_group = process_groups_dict['engram_mp_group']
+    engram_dp_group_gloo = process_groups_dict['engram_dp_group_gloo']
 
     model_parallel_rank = get_pg_rank(mp_group)
 
     if get_pg_size(dp_cp_group) > get_pg_size(intra_dp_cp_group):
-        inter_dist_opt_group = process_groups['inter_dist_opt_group']
+        inter_dist_opt_group = process_groups_dict['inter_dist_opt_group']
         distributed_optimizer_instance_id = get_pg_rank(inter_dist_opt_group)
     else:
         distributed_optimizer_instance_id = 0
@@ -818,6 +801,7 @@ def get_megatron_optimizer(
                     data_parallel_group_idx=model_parallel_rank,
                     intra_dist_opt_group=intra_dist_opt_group,
                     distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                    pg_collection=pg_collection,
                 )
             )
             model_chunk_offset += 1
@@ -865,6 +849,7 @@ def get_megatron_optimizer(
                 data_parallel_group_idx=model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
             )
         )
         model_chunk_offset += 1
@@ -884,11 +869,7 @@ def get_megatron_optimizer(
                 param_to_param_group[param_name] = param_group_id
             param_group_id += 1
     if len(moe_param_groups) > 0:
-        if not isinstance(expt_tp_pp_group, list):
-            expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
-        else:
-            model_parallel_rank = expt_tp_pp_group[0].rank()
-
+        expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
         # Pass Gloo process groups into optimizer only if needed.
         if use_gloo_process_groups:
             expt_data_parallel_group_gloo = intra_expt_dp_group_gloo
@@ -906,8 +887,10 @@ def get_megatron_optimizer(
                 data_parallel_group_idx=expt_model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
             )
         )
+
     # Engram parallel param groups and buffers
     engram_param_groups, engram_buffers = _get_param_groups_and_buffers(
         model_chunks,
@@ -924,7 +907,7 @@ def get_megatron_optimizer(
                 param_to_param_group[param_name] = param_group_id
             param_group_id += 1
     if len(engram_param_groups) > 0:
-        model_parallel_rank = get_pg_rank(engram_mp_group)
+        engram_model_parallel_rank = get_pg_rank(engram_mp_group)
 
         # Pass Gloo process groups into optimizer only if needed.
         if use_gloo_process_groups:
@@ -943,9 +926,10 @@ def get_megatron_optimizer(
                 model_parallel_group=engram_mp_group,
                 data_parallel_group=engram_dp_group,
                 data_parallel_group_gloo=engram_data_parallel_group_gloo,
-                data_parallel_group_idx=model_parallel_rank,
+                data_parallel_group_idx=engram_model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
             )
         )
 
