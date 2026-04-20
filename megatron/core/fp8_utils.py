@@ -18,7 +18,10 @@ from megatron.core.tensor_parallel import (
     reduce_scatter_to_sequence_parallel_region,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.utils import cur_platform, get_te_version, is_te_min_version
+from megatron.core.utils import get_te_version, is_te_min_version
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
