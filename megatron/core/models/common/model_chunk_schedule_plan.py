@@ -131,6 +131,12 @@ class TransformerLayerSchedulePlan:
         extra_args["num_local_experts"] = num_local_experts
         extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
         extra_args["is_mtp"] = is_mtp
+        ########## FlagScale Begin ##########
+        if extra_args.get("is_engram", False):
+            self.layer_state.engram = getattr(self.layer, "engram")
+            self.layer_state.engram_hash_layer_id = getattr(self.layer, "engram_hash_layer_id")
+            self.layer_state.is_engram = True
+        ########## FlagScale End ##########
 
         # wrapper to help create TransformerLayerNode
         def create_node(stream, module, name):
@@ -352,17 +358,20 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             return
         num_layers = len(module.layers)
         for layer_idx in range(num_layers):
+            layer = module.layers[layer_idx]
             extra_args = {
                 "is_first_layer": layer_idx == 0,
                 "is_last_layer": layer_idx == num_layers - 1,
             }
+            ########## FlagScale Begin ##########
+            if hasattr(layer, "engram"):
+                extra_args["is_engram"] = True
+                extra_args["engram_hash_input_ids"] = self.state.extra_block_kwargs[
+                    "engram_hash_input_ids"
+                ]
+            ########## FlagScale End ##########
             layer_plan = TransformerLayerSchedulePlan(
-                module.layers[layer_idx],
-                self.event,
-                self.state,
-                comp_stream,
-                comm_stream,
-                extra_args,
+                layer, self.event, self.state, comp_stream, comm_stream, extra_args
             )
             self._transformer_layers.append(layer_plan)
 
