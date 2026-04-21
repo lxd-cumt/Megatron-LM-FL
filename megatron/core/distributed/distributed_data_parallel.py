@@ -6,6 +6,9 @@ from typing import Optional
 
 import torch
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..fp8_utils import is_float8tensor, post_all_gather_processing
 from ..process_groups_config import ProcessGroupCollection
@@ -15,6 +18,9 @@ from ..utils import log_single_rank
 from .data_parallel_base import _BaseDataParallel
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +245,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 assert (
                     self.ddp_config.use_distributed_optimizer
                 ), 'Partial DistOpt cannot be used without DistOpt'
-                communication_stream = torch.cuda.Stream(device=torch.cuda.current_device())
+                communication_stream = cur_platform.Stream(device=cur_platform.current_device())
                 for bucket_group in bucket_groups:
                     bucket_group.inter_distributed_optimizer_instance_group = (
                         self.inter_dist_opt_group
@@ -672,13 +678,13 @@ class DistributedDataParallel(_BaseDataParallel):
             empty_cache: Whether to call torch.cuda.empty_cache() after freeing.
         """
         if synchronize:
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
 
         for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:
             buffer.offload_to_cpu(move_params=False, move_grads=True)
 
         if empty_cache:
-            torch.cuda.empty_cache()
+            cur_platform.empty_cache()
 
     def restore_grad_buffers(self, synchronize: bool = True) -> None:
         """
@@ -695,4 +701,4 @@ class DistributedDataParallel(_BaseDataParallel):
             buffer.reload_from_cpu(move_params=False, move_grads=True)
 
         if synchronize:
-            torch.cuda.synchronize()
+            cur_platform.synchronize()

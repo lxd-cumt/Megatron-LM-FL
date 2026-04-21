@@ -37,6 +37,9 @@ except ImportError:
 
 from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
 from .. import tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing import ShardedTensor
@@ -55,6 +58,9 @@ from ..transformer.module import MegatronModule
 from .grad_scaler import MegatronGradScaler
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, param_group_identifier_keys
 from .optimizer_config import OptimizerConfig
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 logger = getLogger(__name__)
 
@@ -358,7 +364,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 param_range = gbuf_range["param_map"][model_param]["param"]
 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
 
                     # Generate sharded model param.
                     if is_float8tensor(model_param) and config.fp8_recipe != "delayed":
@@ -417,7 +426,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_fp32_from_float16_params_this_group.append(shard_main_param)
 
                 # fp32 params.
-                elif model_param.type() == 'torch.cuda.FloatTensor':
+                elif (
+                    model_param.device.type == cur_platform.device_name()
+                    and model_param.dtype == torch.float32
+                ):
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -430,9 +442,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'torch.cuda.FloatTensor,  '
-                        'torch.cuda.HalfTensor, or '
-                        'torch.cuda.BFloat16Tensor. '
+                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                         'Received {}'.format(model_param.type())
                     )
 
@@ -579,7 +589,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     # fp32 copy only needed for 16-bit parameters.
-                    if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                    if param.device.type == cur_platform.device_name() and param.dtype in (
+                        torch.float16,
+                        torch.bfloat16,
+                    ):
                         param.main_param = None
                         param.main_param_sharded = True
 
@@ -788,7 +801,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=torch.cuda.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1086,7 +1099,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device

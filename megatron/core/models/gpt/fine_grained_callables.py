@@ -25,6 +25,12 @@ from megatron.core.transformer.transformer_layer import TransformerLayer, make_v
 from megatron.core.typed_torch import apply_module, copy_signature
 from megatron.core.utils import internal_api
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 
 def weak_method(method):
     """Creates a weak reference to a method to prevent circular references.
@@ -332,11 +338,11 @@ class TransformerLayerNode(ScheduleNode):
             return
         if isinstance(self.stream, Callable):
             self.stream = self.stream()
-        with torch.cuda.stream(self.stream):
-            torch.cuda.nvtx.range_push(f"{self.name} wgrad")
+        with cur_platform.stream(self.stream):
+            cur_platform.range_push(f"{self.name} wgrad")
             for module in self.bwd_dw_callables:
                 module.backward_dw()
-            torch.cuda.nvtx.range_pop()
+            cur_platform.range_pop()
 
         # the output grad memory is last used in wgrad compute, should be safe to release.
         assert self.delay_grads_release, "output grad memory should be valid before wgrad."
@@ -612,9 +618,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         )
 
         # Need to record tensors created on comp stream to comm stream
-        node.layer_state.residual.record_stream(torch.cuda.current_stream())
+        node.layer_state.residual.record_stream(cur_platform.current_stream())
         if shared_expert_output is not None:
-            shared_expert_output.record_stream(torch.cuda.current_stream())
+            shared_expert_output.record_stream(cur_platform.current_stream())
 
         # release tensor reference after use
         node.layer_state.residual = None

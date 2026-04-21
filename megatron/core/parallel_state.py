@@ -15,7 +15,13 @@ import torch
 from megatron.core.inference.symmetric_memory import SymmetricMemoryManager
 from megatron.plugin.hetero.parallel_context import get_parallel_context
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
 from .utils import GlobalMemoryBuffer, is_torch_min_version
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +224,7 @@ def update_pg_timeout(
     """
     if hasattr(torch.distributed.distributed_c10d, "_set_pg_timeout"):
         torch.distributed.barrier(pg)
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         try:
             if pg is None:
                 global _global_process_group_list
@@ -985,9 +991,9 @@ def initialize_model_parallel(
         # Therefore, we need to perform a nccl call to ensure that the communicator group is created.
         torch.distributed.barrier(
             group=get_data_parallel_group(with_context_parallel=True),
-            device_ids=[torch.cuda.current_device()],
+            device_ids=[cur_platform.current_device()],
         )
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         # Set `NCCL_COLLNET_ENABLE=0` to restrict SHARP application to the dp group.
         if "NCCL_COLLNET_ENABLE" in os.environ:
             del os.environ["NCCL_COLLNET_ENABLE"]
@@ -1376,9 +1382,9 @@ def initialize_model_parallel(
                 if _INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP is not None:
                     torch.distributed.barrier(
                         group=_INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP,
-                        device_ids=[torch.cuda.current_device()],
+                        device_ids=[cur_platform.current_device()],
                     )
-                    torch.cuda.synchronize()
+                    cur_platform.synchronize()
                 # Set NCCL_COLLNET_ENABLE to 0 to restrict SHARP application to the dp_replica group.
                 if "NCCL_COLLNET_ENABLE" in os.environ:
                     del os.environ["NCCL_COLLNET_ENABLE"]

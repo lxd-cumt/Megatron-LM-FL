@@ -92,6 +92,12 @@ except ImportError:
 
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 except:
@@ -427,7 +433,7 @@ class Attention(MegatronModule, ABC):
             self.num_query_groups_per_partition,
             dim,
             dtype=dtype,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
     def _get_pp_layer_offset_for_inference(self):

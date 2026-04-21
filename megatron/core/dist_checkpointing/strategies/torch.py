@@ -51,6 +51,12 @@ from ..mapping import (
 from .async_utils import AsyncRequest
 from .checkpointable import CheckpointableShardedTensor, LocalShardsContainer
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 try:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (
@@ -65,7 +71,7 @@ except (ImportError, ModuleNotFoundError):
     HAVE_NVRX = False
 
 try:
-    if not torch.cuda.is_available():
+    if not cur_platform.is_available():
         raise ImportError
     from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
