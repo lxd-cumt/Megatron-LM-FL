@@ -145,7 +145,15 @@ def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[i
         vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
 
     if pp_size > 1:
-        if vp_size is not None:
+        ######### FlagScale Begin #########
+        if parallel_state.get_dualpipev_pipeline_model_parallel_world_size() is not None:
+            from megatron.plugin.dualpipev.dualpipev_schedules import (
+                forward_backward_pipelining_with_dualpipev,
+            )
+
+            forward_backward_func = forward_backward_pipelining_with_dualpipev
+        elif vp_size is not None:
+            ######### FlagScale End #########
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
@@ -2191,6 +2199,10 @@ def forward_backward_pipelining_without_interleaving(
         input_tensors = []
         output_tensors = []
     forward_data_store = []
+
+    ######### FlagScale Begin #########
+    p2p_communicator.warm_up_comm_group()
+    ######### FlagScale End #########
 
     # Run warmup forward passes.
     for i in range(num_warmup_microbatches):

@@ -757,6 +757,9 @@ def get_megatron_optimizer(
     intra_dp_cp_group = process_groups_dict['intra_dp_cp_group']
     intra_expt_dp_group = process_groups_dict['intra_expt_dp_group']
     mp_group = process_groups_dict['mp_group']
+    ########## FlagScale Begin ##########
+    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
+    ########## FlagScale End ##########
     expt_tp_pp_group = process_groups_dict['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups_dict['intra_dp_cp_group_gloo']
     intra_expt_dp_group_gloo = process_groups_dict['intra_expt_dp_group_gloo']
@@ -822,7 +825,7 @@ def get_megatron_optimizer(
             model_chunk_offset=model_chunk_offset,
             config=config,
             config_overrides=config_overrides,
-            filter_fn=lambda g: not g['is_expert_parallel'],
+            filter_fn=lambda g: not g['is_expert_parallel'] and not g['is_engram_parallel'],
             buffer_name='buffers',
         )
         for model_chunk in dense_model_chunks:
