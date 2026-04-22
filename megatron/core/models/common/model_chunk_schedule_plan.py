@@ -377,7 +377,12 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 ]
             ########## FlagScale End ##########
             layer_plan = TransformerLayerSchedulePlan(
-                layer, self.event, self.state, comp_stream, comm_stream, extra_args
+                layer,
+                self.event,
+                self.state,
+                comp_stream,
+                comm_stream,
+                extra_args,
             )
             self._transformer_layers.append(layer_plan)
 

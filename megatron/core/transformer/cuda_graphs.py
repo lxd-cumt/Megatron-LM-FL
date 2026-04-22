@@ -80,9 +80,11 @@ try:
 except ImportError:
     pass
 
+########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+########## FlagScale End ##########
 
 
 def is_graph_capturing():
@@ -375,7 +377,7 @@ class _CudagraphGlobalRecord:
 
         progress_bar = enumerate(cls.cudagraph_record)
         time_start = time.time()
-        mem_stats_start = torch.cuda.memory_stats()
+        mem_stats_start = cur_platform.memory_stats()
 
         if torch.distributed.get_rank() == 0:
             if HAVE_TQDM:
@@ -411,14 +413,9 @@ class _CudagraphGlobalRecord:
                     return "%.1f %s" % (mem_bytes / suffix_bytes, suffix)
             return "%d bytes" % mem_bytes
 
-        time_start = time.time()
-        mem_stats_start = cur_platform.memory_stats()
-        progress_bar = enumerate(cls.cudagraph_record)
-        if HAVE_TQDM:
-            progress_bar = tqdm(progress_bar, "create cuda graphs", total=len(cls.cudagraph_record))
         for g_idx, g in progress_bar:
             if torch.distributed.get_rank() == 0:
-                mem_stats = torch.cuda.memory_stats()
+                mem_stats = cur_platform.memory_stats()
                 progress_str = "create cuda graphs | mem: alloc %s, res %s" % (
                     format_mem_bytes(mem_stats["allocated_bytes.all.current"]),
                     format_mem_bytes(mem_stats["reserved_bytes.all.current"]),
@@ -957,7 +954,6 @@ class _CudaGraphRunner(torch.nn.Module):
                 if FREEZE_GC:
                     gc.freeze()
 
-                cur_platform.synchronize()
                 with torch.cuda.graph(
                     self.fwd_graph, pool=self.mempool, capture_error_mode="thread_local"
                 ):
@@ -1074,8 +1070,7 @@ class _CudaGraphRunner(torch.nn.Module):
         if FREEZE_GC:
             gc.freeze()
 
-        cur_platform.synchronize()
-        with torch.cuda.graph(self.bwd_graph, pool=self.mempool, capture_error_mode="thread_local"):
+        with torch.cuda.graph(self.bwd_graph, pool=self.mempool):
             grad_inputs = torch.autograd.grad(
                 outputs=tuple(o for o in self.fwd_graph_output_surface if o.requires_grad),
                 inputs=tuple(i for i in self.fwd_graph_input_surface if i.requires_grad),
@@ -1206,35 +1201,6 @@ class _CudaGraphRunner(torch.nn.Module):
         for o in self.get_tensors(outputs):
             o.cg_buffer_metadata = CudagraphBufferMetadata()
             o.cg_buffer_metadata.is_cudagraph_output = True
-        else:
-            num_dgrads = len(self.static_grad_inputs) - len(list(self.base_module.parameters()))
-            dgrads = self.static_grad_inputs[:num_dgrads]
-            wgrads = self.static_grad_inputs[num_dgrads:]
-
-            wgrads_with_placeholders = []
-            is_dummy_grad = [False] * len(dgrads)
-            for idx, param in enumerate(self.base_module.parameters()):
-                wgrad_is_dummy = getattr(param, "grad_added_to_main_grad", False)
-                if wgrad_is_dummy:
-                    if getattr(param, "zero_out_wgrad", False):
-                        wgrad = torch.zeros(
-                            param.main_grad.shape,
-                            dtype=param.dtype,
-                            device=cur_platform.current_device(),
-                            requires_grad=False,
-                        )
-                    else:
-                        wgrad = torch.empty(
-                            param.main_grad.shape,
-                            dtype=param.dtype,
-                            device=cur_platform.current_device(),
-                            requires_grad=False,
-                        )
-                else:
-                    wgrad = wgrads[idx]
-                wgrads_with_placeholders.append(wgrad)
-                is_dummy_grad.append(wgrad_is_dummy)
-            return tuple(dgrads + wgrads_with_placeholders), is_dummy_grad
 
     def record_graph_capture(self, args, kwargs):
         """Records the data needed to create this runner's forward cudagraph.
@@ -2271,7 +2237,7 @@ class TECudaGraphHelper:
         """
         assert not self._capture_finished, "CUDA Graph capture has already been finished."
 
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         gc.collect()
         cur_platform.empty_cache()
         if FREEZE_GC:
@@ -2307,7 +2273,7 @@ class TECudaGraphHelper:
         )
         _set_capture_end()
 
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         self._reset_after_capture()
         if FREEZE_GC:
             gc.unfreeze()
