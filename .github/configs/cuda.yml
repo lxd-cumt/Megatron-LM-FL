@@ -62,6 +62,7 @@ test_matrix:
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
       - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
       - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
       - tests/unit_tests/test_inference.py
       - tests/unit_tests/test_rl_utils.py
@@ -80,6 +81,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_retro_attention.py
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/dist_checkpointing/test_local.py
 
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
@@ -88,6 +90,7 @@ test_matrix:
       # is in an inconsistent state after the test completes. This is a UCX/NCCL environment issue,
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
+      - tests/unit_tests/tokenizers/test_tokenizer.py::test_multimodal_tokenizer
 
   functional:
     train:

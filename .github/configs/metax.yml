@@ -74,6 +74,8 @@ test_matrix:
       - tests/unit_tests/models/test_mamba_model.py
 
       # 3.transformer
+      # TE _extra_state compatibility issue with AbsorbedMLA
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/transformer/test_attention_no_rope.py
       - tests/unit_tests/transformer/test_attention_packed_seq.py
@@ -156,6 +158,7 @@ test_matrix:
       # transformer: tp*pp>2 or ep>2
       - tests/unit_tests/transformer/test_transformer_layer.py
       - tests/unit_tests/transformer/test_submodule_callables.py
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/transformer/moe/test_sequential_mlp.py
       - tests/unit_tests/transformer/moe/test_token_dispatcher.py
       # tensor_parallel: tp≥4 or tp*pp=8

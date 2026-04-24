@@ -2207,7 +2207,8 @@ def forward_backward_pipelining_without_interleaving(
     forward_data_store = []
 
     ######### FlagScale Begin #########
-    p2p_communicator.warm_up_comm_group()
+    if hasattr(p2p_communicator, 'warm_up_comm_group'):
+        p2p_communicator.warm_up_comm_group()
     ######### FlagScale End #########
 
     # Run warmup forward passes.
