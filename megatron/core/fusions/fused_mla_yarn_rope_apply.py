@@ -7,6 +7,9 @@ import torch
 from packaging import version
 
 from megatron.core.utils import null_decorator
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
@@ -15,7 +18,10 @@ try:
     import triton
     import triton.language as tl
 
-    if version.parse(triton.__version__) < version.parse("3.4.0") and not cur_platform.is_available():
+    if (
+        version.parse(triton.__version__) < version.parse("3.4.0")
+        and not cur_platform.is_available()
+    ):
         HAVE_TRITON = False
     else:
         HAVE_TRITON = tl.constexpr(version.parse(triton.__version__) >= version.parse("2.0.0"))
