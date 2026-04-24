@@ -94,6 +94,9 @@ DEPRECATED_ARGS = [
 ]
 
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 class ContextOverflowError(Exception):
     """Base exception for when a new request does not fit.
 
@@ -741,7 +744,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             (self.max_requests, self.max_kv_block_count),
             -1,
             dtype=torch.int,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
         # Track request metadata.
@@ -754,7 +757,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Per-token state.
         self.token_to_input_ids = torch.full(
-            (self.max_tokens,), 0, dtype=torch.long, device=torch.cuda.current_device()
+            (self.max_tokens,), 0, dtype=torch.long, device=cur_platform.current_device()
         )
         self.token_to_pos_ids = torch.full_like(self.token_to_input_ids, 0)
         self.token_to_request_idx = torch.empty_like(self.token_to_input_ids)
@@ -1404,7 +1407,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Create a single large tensor and slice from it for each prefill request
         max_prefill_tokens = per_prefill_tokens + (1 if rem_prefill_tokens > 0 else 0)
         shared_prefill_tokens = torch.zeros(
-            max_prefill_tokens, dtype=torch.long, device=torch.cuda.current_device()
+            max_prefill_tokens, dtype=torch.long, device=cur_platform.current_device()
         )
 
         prefill_requests = [

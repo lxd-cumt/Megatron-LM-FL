@@ -1,5 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+from re import M
 import warnings
 from copy import copy
 from typing import Optional
@@ -36,6 +37,8 @@ if HAVE_TE:
 else:
     TELinear, set_save_original_input = None, None
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class SharedExpertMLP(MLP):
     """

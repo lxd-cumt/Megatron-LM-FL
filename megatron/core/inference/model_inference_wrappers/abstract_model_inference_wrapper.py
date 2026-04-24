@@ -19,6 +19,8 @@ from megatron.core.utils import deprecate_args, get_attr_wrapped_model, get_mode
 
 DEPRECATED_ARGS = ["inference_wrapper_config", "pg_collection"]
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class AbstractModelInferenceWrapper(abc.ABC):
     """Abstract inference wrapper
@@ -182,7 +184,7 @@ class AbstractModelInferenceWrapper(abc.ABC):
             seq_len = seq_len // self.tp_size
         recv_size = (seq_len, batch_size, self.config.hidden_size)
         return torch.empty(
-            recv_size, dtype=self.pipeline_communication_dtype, device=torch.cuda.current_device()
+            recv_size, dtype=self.pipeline_communication_dtype, device=cur_platform.current_device()
         )
 
     def forward_pass_without_pipeline_parallel(

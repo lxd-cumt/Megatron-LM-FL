@@ -19,7 +19,7 @@ try:
     if is_torch_min_version("2.8.0"):
         from torch.cuda.memory import MemPool
     else:
-        from torch.cuda import MemPool
+        from cur_platform import MemPool
     _has_mem_pool = True
 except ImportError:
     _has_mem_pool = False
@@ -245,10 +245,10 @@ def compile_allocator():
         # Synchronize failure state across ranks. (For currently unknown reasons,
         # one rank can show as FAILURE while the remaining ranks show as SUCCESS.)
         local_state = torch.tensor(
-            [_compilation_state.value], dtype=torch.uint8, device=torch.cuda.current_device()
+            [_compilation_state.value], dtype=torch.uint8, device=cur_platform.current_device()
         )
         world_states = [
-            torch.empty(1, dtype=torch.uint8, device=torch.cuda.current_device())
+            torch.empty(1, dtype=torch.uint8, device=cur_platform.current_device())
             for _ in range(torch.distributed.get_world_size())
         ]
         torch.distributed.all_gather(world_states, local_state)

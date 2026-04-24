@@ -31,6 +31,8 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def weak_method(method):
     """Creates a weak reference to a method to prevent circular references.

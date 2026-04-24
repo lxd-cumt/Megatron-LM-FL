@@ -358,6 +358,13 @@ class OptimizerConfig:
 
     config_logger_dir: str = ""
     """When non-empty, dumps entry-point configs to config_logger_dir"""
+    
+    ########## FlagScale Begin ##########
+    ################
+    # Grouped learning rate for multi-model training.
+    ################
+    vision_ration: float = 1.0
+    ########## FlagScale End ##########
 
     ########## FlagScale Begin ##########
     ################
@@ -482,3 +489,14 @@ class SGDOptimizerConfig(OptimizerConfig):
 
     sgd_momentum: float = 0.9
     """Momentum factor for SGD optimizer."""
+
+
+@dataclass
+class MuonOptimizerConfig(OptimizerConfig):
+    # Muon.
+    muon_momentum: float = 0.95
+    """Momentum factor for Muon optimizer."""
+    muon_nesterov: bool = True
+    muon_ns_steps: int = 5
+    """The adamw update rms that muon is designed to matched, typicially 0.2 ~ 0.4"""
+    muon_matched_adamw_rms: float = 0.2

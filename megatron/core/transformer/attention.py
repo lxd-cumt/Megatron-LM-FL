@@ -120,6 +120,8 @@ try:
 except ImportError:
     HAVE_FUSED_QKV_ROPE = False
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class LinearQkv(Protocol):
     """Protocol for linear_qkv modules."""

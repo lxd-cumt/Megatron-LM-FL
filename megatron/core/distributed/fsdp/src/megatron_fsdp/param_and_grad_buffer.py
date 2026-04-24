@@ -1637,7 +1637,7 @@ class ParamAndGradBuffer:
         mixed_precision_policy: MixedPrecisionPolicy = MixedPrecisionPolicy(),
         gradient_scaling_factor: Optional[float] = None,
         expert_gradient_scaling_factor: Optional[float] = None,
-        device: torch.device = torch.device("cuda"),
+        device: torch.device = torch.device(cur_platform.device_name()),
         only_create_grad_buffer_and_main_weight_buffer_for_param_requires_grad: bool = True,
         reset_parameters_for_meta_device_init_module: bool = False,
     ):

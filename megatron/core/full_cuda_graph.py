@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 # detached from the computation graph, and moved to CUDA device. Non-tensor objects
 # are returned as-is.
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def copy_tensors_in_struct(src):
     """Copy src to new tensors."""
@@ -31,7 +33,7 @@ def copy_tensors_in_struct(src):
     elif isinstance(src, dict):
         return {k: copy_tensors_in_struct(src[k]) for k in src}
     elif isinstance(src, torch.Tensor):
-        return src.clone().detach().cuda()
+        return src.clone().detach().to(cur_platform.device())
     else:
         return src
 
@@ -85,7 +87,7 @@ class StaticBufferLoader:
                 if k not in StaticBufferLoader.static_buffers[stage][microbatch]:
                     if isinstance(inputs[k], torch.Tensor):
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = torch.empty_like(
-                            inputs[k], device="cuda"
+                            inputs[k], device=cur_platform.device_name()
                         )
                     else:
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = inputs[k]

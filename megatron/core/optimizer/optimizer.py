@@ -5,6 +5,7 @@
 import copy
 import logging
 import math
+from re import M
 import warnings
 from abc import ABC, abstractmethod
 from itertools import chain
@@ -53,6 +54,8 @@ from ..utils import log_single_rank
 from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad_norm_fp32
 from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
+
+from megatron.plugin.decorators import overridable
 
 logger = getLogger(__name__)
 
@@ -1469,7 +1472,7 @@ class ChainedOptimizer(MegatronOptimizer):
 
             # Lazy loading checkpoint, state dict is needed only when DP rank = 0.
             if optimizer.data_parallel_group.rank() == 0 and states is None:
-                states = torch.load(filename)
+                states = torch.load(filename, weights_only=False)
 
             state_dict = states[idx] if states else None
             optimizer.load_parameter_state_from_dp_zero(

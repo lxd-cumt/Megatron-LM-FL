@@ -64,6 +64,9 @@ except ImportError as import_megatron_fsdp_error:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 class FullyShardedDataParallel(_BaseDataParallel):
     """

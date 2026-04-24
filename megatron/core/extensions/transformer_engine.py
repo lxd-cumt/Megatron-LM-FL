@@ -300,6 +300,8 @@ from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}

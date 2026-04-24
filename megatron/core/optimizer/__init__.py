@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 from torch.optim import SGD as CPUSGD
 from torch.optim import AdamW as CPUAdam
+from .muon import Muon
 
 try:
     from transformer_engine.pytorch.optimizers import FusedAdam as Adam
@@ -413,6 +414,28 @@ def _get_param_groups(
         }
         param_groups.append(param_group)
 
+    for key in muon_params_key:
+        wd_mult, is_expert_parallel, _ = key
+        params = muon_params_map[key] if key in muon_params_map else []
+        config, uses_default_config = None, True
+        if key not in configs_map:
+            assert params == []
+        else:
+            config, uses_default_config = configs_map[key]
+            assert config is not None
+
+        param_groups.append(
+            {
+                'params': params,
+                'wd_mult': wd_mult,  # For backwards compatibility.
+                'lr_mult': 1.0,  # For backwards compatibility.
+                'is_expert_parallel': is_expert_parallel,
+                'is_decoupled_lr': False,  # For backwards compatibility.
+                'default_config': uses_default_config,
+                'use_muon': True,
+            }
+        )
+
     return param_groups
 
 
@@ -613,6 +636,25 @@ def _get_megatron_optimizer_based_on_param_groups(
                 momentum=config.sgd_momentum,
             )
             init_state_fn = None
+        elif config.optimizer == 'muon':
+            optimizer = Muon(param_groups,
+                             lr=config.lr, weight_decay=config.weight_decay,
+                             matched_adamw_rms=config.muon_matched_adamw_rms,
+                             momentum=config.muon_momentum,
+                             nesterov=config.muon_nesterov,
+                             ns_steps=config.muon_ns_steps,
+                             adamw_betas=(config.adam_beta1, config.adam_beta2),
+                             adamw_eps=config.adam_eps)
+
+            def init_state_fn(opt, config=None):
+                for group in opt.param_groups:
+                    for p in group['params']:
+                        if len(opt.state[p]) == 0:
+                            if config is None or not config.use_precision_aware_optimizer:
+                                opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
+                                opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
+                            else:
+                                opt.initialize_state(p)
         else:
             raise Exception('{} optimizer is not supported.'.format(config.optimizer))
     else:
@@ -872,7 +914,11 @@ def get_megatron_optimizer(
                 param_to_param_group[param_name] = param_group_id
             param_group_id += 1
     if len(moe_param_groups) > 0:
-        expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        if not isinstance(expt_tp_pp_group, list):
+            expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        else:
+            model_parallel_rank = expt_tp_pp_group[0].rank()
+
         # Pass Gloo process groups into optimizer only if needed.
         if use_gloo_process_groups:
             expt_data_parallel_group_gloo = intra_expt_dp_group_gloo
@@ -933,6 +979,44 @@ def get_megatron_optimizer(
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
                 pg_collection=pg_collection,
+            )
+        )
+    # Engram parallel param groups and buffers
+    engram_param_groups, engram_buffers = _get_param_groups_and_buffers(
+        model_chunks,
+        model_chunk_offset=0,
+        config=config,
+        config_overrides=config_overrides,
+        filter_fn=lambda g: g['is_engram_parallel'],
+        buffer_name='engram_embedding_buffers',
+    )
+    if dump_param_to_param_group_map is not None:
+        for param_group in engram_param_groups:
+            for param in param_group["params"]:
+                param_name = get_global_unique_param_name(model_chunks, param)
+                param_to_param_group[param_name] = param_group_id
+            param_group_id += 1
+    if len(engram_param_groups) > 0:
+        model_parallel_rank = get_pg_rank(engram_mp_group)
+
+        # Pass Gloo process groups into optimizer only if needed.
+        if use_gloo_process_groups:
+            engram_data_parallel_group_gloo = engram_dp_group_gloo
+        else:
+            engram_data_parallel_group_gloo = None
+        assert distributed_optimizer_instance_id == 0, "Engram parallel optimizer only supports a single instance."
+        optimizers.append(
+            _get_megatron_optimizer_based_on_param_groups(
+                config=config,
+                model_chunks=model_chunks,
+                param_groups=engram_param_groups,
+                per_model_buffers=engram_buffers,
+                model_parallel_group=engram_mp_group,
+                data_parallel_group=engram_dp_group,
+                data_parallel_group_gloo=engram_data_parallel_group_gloo,
+                data_parallel_group_idx=model_parallel_rank,
+                intra_dist_opt_group=intra_dist_opt_group,
+                distributed_optimizer_instance_id=distributed_optimizer_instance_id,
             )
         )
 

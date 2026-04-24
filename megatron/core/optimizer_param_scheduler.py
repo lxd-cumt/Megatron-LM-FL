@@ -178,6 +178,15 @@ class OptimizerParamScheduler:
             assert not self.use_checkpoint_opt_param_scheduler, (
                 'both override and ' 'use-checkpoint are set.'
             )
+        
+        self.stablelm2_scheduler_config = stablelm2_scheduler_config
+        if self.stablelm2_scheduler_config is not None:
+          ## absolute samples
+          self.stablelm2_scheduler_config.rsqrt_samples += \
+              self.stablelm2_scheduler_config.cosine_samples
+          ## N of consine
+          if self.stablelm2_scheduler_config.cosine_period_samples == 0:
+            self.stablelm2_scheduler_config.cosine_period_samples = self.lr_decay_steps
 
         self.stablelm2_scheduler_config = stablelm2_scheduler_config
         if self.stablelm2_scheduler_config is not None:

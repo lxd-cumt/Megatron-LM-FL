@@ -11,6 +11,9 @@ from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 try:
     import triton
     import triton.language as tl

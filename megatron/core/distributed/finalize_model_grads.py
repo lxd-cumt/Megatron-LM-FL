@@ -31,6 +31,7 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
+from megatron.plugin.decorators import overridable
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):

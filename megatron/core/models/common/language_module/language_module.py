@@ -39,6 +39,8 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class LanguageModule(MegatronModule):
     """Base language module that has common helper functions used across GPT, BERT etc.

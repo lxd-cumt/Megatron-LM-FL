@@ -47,6 +47,9 @@ from .combined_1f1b import (
 )
 from .hybrid_cp_schedule import hybrid_context_parallel_forward_backward
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -434,7 +437,7 @@ def forward_step(
     set_input_tensor(input_tensor)
 
     if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
+        context_manager = torch.autocast(cur_platform.device_name(), dtype=config.autocast_dtype)
     else:
         context_manager = contextlib.nullcontext()
     with context_manager:

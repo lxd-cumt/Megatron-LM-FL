@@ -88,6 +88,9 @@ _flashinfer_version = None
 _mamba_ssm_version = None
 _causal_conv1d_version = None
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 @contextmanager
 def null_decorator(*args, **kwargs):
@@ -899,7 +902,7 @@ def check_param_hashes_across_dp_replicas(
         assert len(params) == len(local_param_hashes)
         if len(params) == 0:
             continue
-        local_param_hashes = torch.stack(local_param_hashes).cuda()
+        local_param_hashes = torch.stack(local_param_hashes).to(cur_platform.device())
         all_param_hashes = [
             torch.zeros_like(local_param_hashes) for _ in range(all_gather_group.size())
         ]
@@ -1208,7 +1211,7 @@ def local_multi_tensor_l2_norm(chunk_size, noop_flag, tensor_lists, per_tensor, 
     """
     l2 = [[(torch.norm(tensor)) for tensor in tensor_list] for tensor_list in tensor_lists]
     l2_reduced = torch.norm(torch.tensor(l2))
-    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float, device="cuda")
+    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float).to(cur_platform.device())
     return l2_cuda, None
 
 

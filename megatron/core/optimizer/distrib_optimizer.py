@@ -65,6 +65,9 @@ cur_platform = get_platform()
 
 logger = getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 class Range:
     """
@@ -169,6 +172,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 sub_param_start = max(0, gbuf_world_range.start - param_world_start)
                 sub_param_range = param_local_range.normalize(sub_param_start)
                 param_range_map[param] = {
+                    "world_indexes": (param_world_start, param_world_end),
                     "gbuf_world": param_world_range,
                     "gbuf_world_in_bucket": param_world_range_in_bucket,
                     "gbuf_local": param_local_range,
@@ -358,14 +362,24 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_fp32_groups.append(shard_fp32_params_this_group)
             shard_fp32_from_float16_groups.append(shard_fp32_from_float16_params_this_group)
 
+            dist_metas = {}
+
             for model_param in group_range["params"]:
 
                 assert model_param.requires_grad
 
                 gbuf_index, dtype, bucket_index = param_gbuf_map[model_param]
                 gbuf_range = gbuf_ranges[gbuf_index][dtype][bucket_index]
-                param_range = gbuf_range["param_map"][model_param]["param"]
+                # param_range = gbuf_range["param_map"][model_param]["param"]
+                param_gbuf_ranges = gbuf_range["param_map"][model_param]
+                param_range = param_gbuf_ranges["param"]
 
+                # gen dist meta
+                param_world_indexes = param_gbuf_ranges["world_indexes"]
+                tp_split_dim = -1 if not getattr(model_param, 'tensor_model_parallel', False) else \
+                    getattr(model_param, 'partition_dim')
+                dist_meta = MuonDistMeta(gbuf_index, bucket_index, model_param.shape, param_world_indexes, tp_split_dim)
+                
                 # fp16, bf16 params.
                 if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
                     torch.float16,
@@ -430,6 +444,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_float16_params_this_group.append(shard_model_param)
                     shard_fp32_from_float16_params_this_group.append(shard_main_param)
 
+                    # add to dist metas
+                    dist_metas[shard_main_param] = dist_meta
+
                 # fp32 params.
                 elif (
                     model_param.device.type == cur_platform.device_name()
@@ -469,7 +486,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             shard_float16_groups,
             shard_fp32_groups,
             shard_fp32_from_float16_groups,
-        )
+        ), dist_metas
 
     def __init__(
         self,
@@ -527,12 +544,13 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
         assert (
-            isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
+            isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer, Muon))
             or optimizer is None
         ), (
-            "Only Adam and HybridDeviceOptimizer currently supported, "
+            "Only Adam / HybridDeviceOptimizer / Muon currently supported, "
             "due to checkpointing requirements."
         )
+
 
         # when freezing sub-models we have no real optimizer
         # but still need a stub DistributedOptimizer class
@@ -613,7 +631,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self.shard_float16_groups,
             self.shard_fp32_groups,
             self.shard_fp32_from_float16_groups,
-        ) = self._build_model_and_main_param_groups(
+        ), dist_metas = self._build_model_and_main_param_groups(
             self.gbuf_ranges, self.model_param_gbuf_map, self.opt_group_ranges, config
         )
 
@@ -624,6 +642,19 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             self.optimizer.param_groups = [g["orig_group"] for g in self.opt_group_ranges]
             self.optimizer.load_state_dict(self.optimizer.state_dict())
+            # for muon optimizer, enable distributed mode
+            if isinstance(self.optimizer, Muon):
+                assert all(grad_buffer.grad_dtype == torch.float32 for grad_buffer in self.buffers), \
+                    "all grad buffer should only contains float32 type for muon optimizer"
+                gbuf_sizes = [ [(bucket.grad_data.numel(), bucket.offset) for bucket in buffer.buckets ]
+                                for buffer in self.buffers ]
+                self.optimizer.enable_distributed_mode(
+                    gbuf_sizes, self.data_parallel_group,
+                    get_tensor_model_parallel_group(),
+                    dist_metas,
+                )
+
+        self.is_stub_optimizer = False
 
     def _get_model_param_range_map(self, param: torch.nn.Parameter):
         """
@@ -761,6 +792,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     pass
                 elif f"pre_{key}" in param_group:
                     key = f"pre_{key}"
+                elif key == 'use_muon':
+                    param_group[key] = False
+                elif key == 'is_vision_model_param':
+                    param_group[key] = False
                 else:
                     raise ValueError(
                         f"Key {key} (or pre_{key}) not found in param_group {param_group}."
@@ -811,10 +846,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # For precision_aware_optimizer, the empty tensors should also be
                             #  initialized with the correct dtype.
-                            tensors = {
-                                "exp_avg": init_shard(self.config.exp_avg_dtype),
-                                "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype),
-                            }
+                            # For muon optimizer link state ( for load state dict )
+                            if isinstance(self.optimizer, Muon):
+                                group = self.optimizer.param_groups[group_index]
+                                is_muon_group = group.get("use_muon", False)
+                                if is_muon_group:
+                                    tensors = {"muon_buffer": init_shard(self.config.exp_avg_dtype)}
+                                else:
+                                    tensors = {"adamw_exp_avg": init_shard(self.config.exp_avg_dtype), "adamw_exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype)}
+                            
+                            else:
+                                tensors = {"exp_avg": init_shard(self.config.exp_avg_dtype), "exp_avg_sq": init_shard(self.config.exp_avg_sq_dtype)}         
+
                             if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
                                 if self.config.store_param_remainders and self.config.bf16:
                                     tensors["master_param"] = init_shard(torch.int16)
@@ -1116,7 +1159,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather.
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
+                                send_tensor = send_tensor.to(cur_platform.device())
                             if return_on_all_ranks:
                                 torch.distributed.all_gather(
                                     recv_tensors, send_tensor, data_parallel_group

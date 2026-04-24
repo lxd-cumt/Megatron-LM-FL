@@ -19,6 +19,10 @@ from megatron.plugin.utils import is_built_on_zero_rank
 
 cur_platform = get_platform()
 
+from megatron.plugin.utils import is_built_on_zero_rank
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 logger = logging.getLogger(__name__)
 
 MidLevelDataset = MegatronDataset

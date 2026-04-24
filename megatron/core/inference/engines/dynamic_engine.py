@@ -349,7 +349,7 @@ class DynamicInferenceEngine(AbstractEngine):
         controller = self.controller
 
         time_start = time.time()
-        mem_stats_start = torch.cuda.memory_stats()
+        mem_stats_start = cur_platform.memory_stats()
 
         logging.info("> dynamic_engine.py: building cuda graphs for ")
         for graph in context.cuda_graph_batch_dimensions_list:
@@ -398,7 +398,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
         # Memory usage.
         time_end = time.time()
-        mem_stats_end = torch.cuda.memory_stats()
+        mem_stats_end = cur_platform.memory_stats()
         capture_stats = {
             "time": time_end - time_start,
             "allocated_bytes": (
@@ -649,7 +649,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
         try:
 
-            start_mem = torch.cuda.memory_stats()
+            start_mem = cur_platform.memory_stats()
             start_time = time.time()
             range_push(f"{key}-inference-context")
             torch.cuda.synchronize()
@@ -661,7 +661,7 @@ class DynamicInferenceEngine(AbstractEngine):
             range_pop()
             end_time = time.time()
 
-            end_mem = torch.cuda.memory_stats()
+            end_mem = cur_platform.memory_stats()
             start_mem_alloc = start_mem["allocated_bytes.all.current"]
             end_mem_alloc = end_mem["allocated_bytes.all.current"]
             start_mem_res = start_mem["reserved_bytes.all.current"]
@@ -772,7 +772,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
             # Re-add requests saved during suspend.
             add_time = time.time()
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
             for request_id in self.resume_request_ids:
                 self._add_request(self.get_request(request_id))
 
@@ -986,16 +986,16 @@ class DynamicInferenceEngine(AbstractEngine):
                     self.controller.tokenizer, prompt
                 )
             tokens = torch.tensor(
-                prompt_token_ids, dtype=torch.int64, device=torch.cuda.current_device()
+                prompt_token_ids, dtype=torch.int64, device=cur_platform.current_device()
             )
         elif isinstance(prompt, list):
             # Convert List[int] -> Tensor.
-            tokens = torch.tensor(prompt, dtype=torch.int64, device=torch.cuda.current_device())
+            tokens = torch.tensor(prompt, dtype=torch.int64, device=cur_platform.current_device())
         elif isinstance(prompt, torch.Tensor):
             # Prompt already tokenized.
             assert prompt.dtype == torch.int64, prompt.dtype
             assert prompt.device == torch.device(
-                f"cuda:{torch.cuda.current_device()}"
+                cur_platform.current_device_name()
             ), prompt.device
             tokens = prompt
 

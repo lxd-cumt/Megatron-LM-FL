@@ -19,6 +19,8 @@ from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import log_single_rank
 from megatron.plugin.utils import is_built_on_zero_rank
 
+from megatron.plugin.utils import is_built_on_zero_rank
+
 logger = logging.getLogger(__name__)
 
 

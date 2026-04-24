@@ -10,7 +10,7 @@ PRE_RELEASE = ""
 VERSION = (MAJOR, MINOR, PATCH, PRE_RELEASE)
 
 __shortversion__ = '.'.join(map(str, VERSION[:3]))
-__version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:])
+__version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:]) + (f'+{LOCAL}' if LOCAL else '')
 
 __package_name__ = 'megatron_core'
 __contact_names__ = 'NVIDIA'

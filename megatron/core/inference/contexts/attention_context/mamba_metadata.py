@@ -37,7 +37,7 @@ class MambaMetadata:
 
         # Map from requests to slots in the static Mamba state buffer
         self.request_to_mamba_state_idx = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
         )
 
         # Map from requests to slots in the static Mamba state buffer for active decode requests
@@ -86,7 +86,7 @@ class MambaMetadata:
 
         # Allocator for Mamba state slots
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
+            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 
@@ -119,7 +119,7 @@ class MambaMetadata:
 
         # Re-initialize the free slot pool
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
+            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 

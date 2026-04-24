@@ -617,6 +617,12 @@ class TransformerConfig(ModelParallelConfig):
     together with fp4 mode (i.e., TransformerConfig.fp4 is not None). Note that not all parameters
     will be converted to fp4; for example, biases will remain unchanged."""
 
+    ####################
+    # DualPipeV related
+    ####################
+    use_dualpipev: bool = False
+    moe_fb_overlap: bool = False
+
     fp4_quantizer_factory: Optional[str] = None
     """Python import path to a callable quantizer factory, e.g., package.module.quantizer_factory.
     Required when fp4_recipe is custom."""
@@ -904,6 +910,9 @@ class TransformerConfig(ModelParallelConfig):
 
     config_logger_dir: str = ""
     """When non-empty, dumps entry-point configs to config_logger_dir"""
+
+    qk_layernorm_hidden_dim: bool = False
+    """Whether to apply LayerNorm to the query and key embeddings on the hidden dimension rather than head dimension."""
 
     flash_decode: bool = False
     """ Use the optimized flash decoding kernel during inference. """

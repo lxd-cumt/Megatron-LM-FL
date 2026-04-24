@@ -57,6 +57,9 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 try:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (

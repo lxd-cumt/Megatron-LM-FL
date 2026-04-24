@@ -89,6 +89,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class ExtendedRMSNorm(RMSNormGated):
     """
@@ -292,7 +294,7 @@ class MambaMixer(MegatronModule):
                 kernel_size=d_conv,
                 groups=conv_dim,
                 padding=d_conv - 1,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.params_dtype,
             )
             setattr(self.conv1d.weight, "tensor_model_parallel", True)
@@ -324,7 +326,7 @@ class MambaMixer(MegatronModule):
             dt = torch.exp(
                 torch.rand(
                     self.nheads_local_tp,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                     dtype=config.params_dtype,
                 )
                 * (math.log(dt_max) - math.log(dt_min))
@@ -351,7 +353,7 @@ class MambaMixer(MegatronModule):
         self.D = nn.Parameter(
             torch.ones(
                 self.d_inner_local_tp if self.D_has_hdim else self.nheads_local_tp,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
         )  # Keep in fp32
         setattr(self.D, "tensor_model_parallel", True)
@@ -363,7 +365,7 @@ class MambaMixer(MegatronModule):
                 eps=1e-5,
                 group_size=self.d_inner_local_tp // self.ngroups_local_tp,
                 norm_before_gate=self.norm_before_gate,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.params_dtype,
             )
             setattr(self.norm.weight, "tensor_model_parallel", True)

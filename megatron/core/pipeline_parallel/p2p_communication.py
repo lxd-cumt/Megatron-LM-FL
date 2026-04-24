@@ -3,6 +3,7 @@
 
 from functools import partial
 from typing import List, Optional, Tuple, Union
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -18,6 +19,8 @@ from megatron.plugin.hetero.p2p_communication import (
     send_forward_hetero,
     send_forward_recv_backward_hetero,
 )
+
+from megatron.plugin.hetero.p2p_communication import recv_forward_hetero, recv_backward_hetero, send_backward_hetero, send_forward_hetero, send_forward_recv_backward_hetero, send_backward_recv_forward_hetero
 
 # Types
 Shape = Union[List[int], torch.Size]

@@ -19,6 +19,8 @@ from megatron.core.utils import get_attr_wrapped_model
 # Types
 Shape = Union[List[int], torch.Size]
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def combined_1f1b_schedule_for_no_pipelining(
     forward_step_func,
@@ -310,7 +312,7 @@ def combined_forward_backward_step(
         config.timers('forward-compute', log_level=2).start()
 
     if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
+        context_manager = torch.autocast(cur_platform.device_name(), dtype=config.autocast_dtype)
     else:
         context_manager = contextlib.nullcontext()
 

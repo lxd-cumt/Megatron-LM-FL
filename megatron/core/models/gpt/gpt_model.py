@@ -45,6 +45,8 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class GPTModel(LanguageModule):
     """GPT Transformer language model.
