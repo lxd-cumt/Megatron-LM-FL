@@ -1296,31 +1296,41 @@ class SelfAttention(Attention):
 
         if submodules.q_layernorm is not None:
             ######### FlagScale Begin #########
-            if self.config.qk_layernorm_hidden_dim:
-                q_layernorm_hidden_size = self.query_projection_size
+            if not self.config.qk_layernorm_hidden_dim:
+                self.q_layernorm = submodules.q_layernorm(
+                    hidden_size=self.hidden_size_per_attention_head,
+                    config=self.config,
+                    eps=self.config.layernorm_epsilon,
+                )
             else:
-                ######### FlagScale End #########
-                q_layernorm_hidden_size = self.hidden_size_per_attention_head
-            self.q_layernorm = submodules.q_layernorm(
-                hidden_size=q_layernorm_hidden_size,
-                config=self.config,
-                eps=self.config.layernorm_epsilon,
-            )
+                tp_world_size = get_tensor_model_parallel_world_size()
+                assert tp_world_size <= 1, "TP world size must be less than 1 for qk_layernorm_hidden_dim"
+                self.q_layernorm = submodules.q_layernorm(
+                    hidden_size=self.query_projection_size,
+                    config=self.config,
+                    eps=self.config.layernorm_epsilon,
+                )
+            ######### FlagScale End #########
         else:
             self.q_layernorm = None
 
         if submodules.k_layernorm is not None:
             ######### FlagScale Begin #########
-            if self.config.qk_layernorm_hidden_dim:
-                k_layernorm_hidden_size = self.kv_projection_size
+            if not self.config.qk_layernorm_hidden_dim:
+                self.k_layernorm = submodules.k_layernorm(
+                    hidden_size=self.hidden_size_per_attention_head,
+                    config=self.config,
+                    eps=self.config.layernorm_epsilon,
+                )
             else:
-                ######### FlagScale End #########
-                k_layernorm_hidden_size = self.hidden_size_per_attention_head
-            self.k_layernorm = submodules.k_layernorm(
-                hidden_size=k_layernorm_hidden_size,
-                config=self.config,
-                eps=self.config.layernorm_epsilon,
-            )
+                tp_world_size = get_tensor_model_parallel_world_size()
+                assert tp_world_size <= 1, "TP world size must be less than 1 for qk_layernorm_hidden_dim"
+                self.k_layernorm = submodules.k_layernorm(
+                    hidden_size=self.kv_projection_size,
+                    config=self.config,
+                    eps=self.config.layernorm_epsilon,
+                )
+            ######### FlagScale End #########
         else:
             self.k_layernorm = None
 
@@ -1504,10 +1514,26 @@ class SelfAttention(Attention):
             query = query[:, :, idx * size : (idx + 1) * size, :]
 
         if self.q_layernorm is not None:
-            query = apply_module(self.q_layernorm)(query)
+            ######### FlagScale Begin #########
+            if not self.config.qk_layernorm_hidden_dim:
+                query = apply_module(self.q_layernorm)(query)
+            else:
+                query_shape = list(query.shape)
+                query = query.reshape(query.size(0), query.size(1), 1, -1)
+                query = apply_module(self.q_layernorm)(query)
+                query = query.reshape(*query_shape)
+            ######### FlagScale End #########
 
         if self.k_layernorm is not None:
-            key = apply_module(self.k_layernorm)(key)
+            ######### FlagScale Begin #########
+            if not self.config.qk_layernorm_hidden_dim:
+                key = apply_module(self.k_layernorm)(key)
+            else:
+                key_shape = list(key.shape)
+                key = key.reshape(key.size(0), key.size(1), 1, -1)
+                key = apply_module(self.k_layernorm)(key)
+                key = key.reshape(*key_shape)
+            ######### FlagScale End #########
 
         if self.config.test_mode:
             self.run_realtime_tests()
