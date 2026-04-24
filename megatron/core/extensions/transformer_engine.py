@@ -2561,16 +2561,33 @@ try:
     ):
         """Get CPU offload context and sync function."""
         if is_te_min_version("2.5.0"):
-            # Enables the additional double buffering switch for activations during LLM training
-            context, sync_func = _get_cpu_offload_context(
-                enabled,
-                num_layers,
-                model_layers,
-                activation_offloading,
-                weight_offloading,
-                double_buffering,
-                retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
-            )
+            # FlagScale Begin
+            # Check whether the installed TE actually supports retain_pinned_cpu_buffers,
+            # since custom TE builds (e.g. v0.1.0+te2.9.0) may report >= 2.5.0 but
+            # lack this parameter.
+            import inspect
+
+            _sig = inspect.signature(_get_cpu_offload_context)
+            if "retain_pinned_cpu_buffers" in _sig.parameters:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                    retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
+                )
+            else:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                )
+            # FlagScale End
         elif is_te_min_version("1.10.0.dev0"):
             context, sync_func = _get_cpu_offload_context(
                 enabled, num_layers, model_layers, activation_offloading, weight_offloading
