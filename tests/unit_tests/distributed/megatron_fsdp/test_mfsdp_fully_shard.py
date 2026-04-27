@@ -863,6 +863,10 @@ class TestMegatronFsdpFullyShard:
             pytest.skip(
                 f"TransformerEngine FP8 all-gather requires a main parameter buffer for FSDP."
             )
+        if model_type == TE_TRANSFORMER and not hasattr(te.pytorch, 'quantized_model_init'):
+            pytest.skip(
+                "TE version does not support quantized_model_init (requires TE >= 2.10)"
+            )
 
         # Construct device mesh with DP-Outer=2 and DP-Shard=4.
         device_mesh = build_distributed_environment((2, 4, 1, 1))
