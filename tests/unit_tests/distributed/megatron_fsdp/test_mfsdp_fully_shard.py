@@ -706,6 +706,10 @@ class TestMegatronFsdpFullyShard:
             optimizer.step()
             optimizer.zero_grad()
 
+    @pytest.mark.skipif(
+        not hasattr(te.pytorch, 'quantized_model_init'),
+        reason="TE version does not support quantized_model_init (requires TE >= 2.10)",
+    )
     @pytest.mark.parametrize("init_model_with_meta_device", [True, False])
     @pytest.mark.parametrize(
         "te_recipe",

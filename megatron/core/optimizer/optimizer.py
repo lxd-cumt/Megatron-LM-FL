@@ -105,7 +105,6 @@ param_group_identifier_keys = (
     'lr_mult',
     'is_expert_parallel',
     'is_decoupled_lr',
-    'use_muon',
     'is_vision_model_param',
     'is_engram_parallel',
 )  ####FlagScale add is_vision_model_param
