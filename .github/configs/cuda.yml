@@ -87,6 +87,7 @@ test_matrix:
       - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       - tests/unit_tests/dist_checkpointing/test_local.py
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
 
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
       # Root cause: UCX (HPC-X libucs.so) crashes in torch.distributed.barrier() called from the
