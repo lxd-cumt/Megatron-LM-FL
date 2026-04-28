@@ -112,3 +112,12 @@ def reset_env_vars():
     # After the test, restore the original environment
     os.environ.clear()
     os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory():
+    """Clean up GPU memory after each test to prevent OOM in CI."""
+    yield
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
