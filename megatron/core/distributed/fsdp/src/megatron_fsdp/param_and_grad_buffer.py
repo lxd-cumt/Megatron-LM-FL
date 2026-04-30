@@ -51,9 +51,9 @@ from .utils import (
     FSDPDistributedIndex,
     get_global_memory_buffer,
     get_mcore_tensor_parallel_partition_dim,
-    is_mcore_tensor_model_parallel,
     is_mcore_tensor_parallel_duplicated,
     log_single_rank,
+    using_tensor_parallel,
 )
 
 logger = logging.getLogger(__name__)
@@ -1648,6 +1648,7 @@ class ParamAndGradBuffer:
         )
 
         self.ddp_config = ddp_config
+        self.use_decoupled_grad = ddp_config.megatron_fsdp_use_decoupled_grad
         self.module = module
         self.bucketing_policy = bucketing_policy
         self.param_to_name = {p: name for name, p in self.module.named_parameters()}
@@ -1697,9 +1698,6 @@ class ParamAndGradBuffer:
             if self.dist_index.get_fsdp_group(is_expert_parallel=True) is not None:
                 # Expert-DP group when using EP
                 self.ubr_groups.append(self.dist_index.get_fsdp_group(is_expert_parallel=True))
-            if self.dist_index.get_outer_fsdp_group() is not None:
-                # Outer/Inter-FSDP group when using hybrid FSDP
-                self.ubr_groups.append(self.dist_index.get_outer_fsdp_group())
             if (
                 self.dist_index.get_fsdp_group(
                     is_expert_parallel=False, independent_all_gather=True
@@ -1712,6 +1710,19 @@ class ParamAndGradBuffer:
                         is_expert_parallel=False, independent_all_gather=True
                     )
                 )
+            if (
+                self.dist_index.get_fsdp_group(is_expert_parallel=True, independent_all_gather=True)
+                is not None
+            ):
+                # Expert all-gather group used when overlapping all-gather and gradient reduction.
+                self.ubr_groups.append(
+                    self.dist_index.get_fsdp_group(
+                        is_expert_parallel=True, independent_all_gather=True
+                    )
+                )
+            if self.dist_index.get_outer_fsdp_group() is not None:
+                # Outer/Inter-FSDP group when using hybrid FSDP (IB domain, registered last).
+                self.ubr_groups.append(self.dist_index.get_outer_fsdp_group())
 
             log_single_rank(
                 logger,
@@ -2187,14 +2198,14 @@ class ParamAndGradBuffer:
                     is_expert_parallel=group.is_expert_param
                 )
 
-            # When --create-all-gather-group is enabled, use a separate process group for
-            # all-gather operations (model_weight_buffer) to enable overlap with gradient reduction
-            # operations (main_grad_buffer). This avoids head-of-line blocking between forward
-            # all-gather and backward reduce-scatter on the same communicator.
+            # Use separate process group for all-gather operations (model_weight_buffer)
+            # to enable overlap with gradient reduction operations (main_grad_buffer).
+            # This avoids head-of-line blocking between forward all-gather and backward
+            # reduce-scatter on the same communicator.
             model_wbuf_dp_group = main_buf_dp_group
-            if not group.is_expert_param and not should_create_hfsdp_helper_buffers:
+            if not should_create_hfsdp_helper_buffers:
                 ag_group = self.dist_index.get_fsdp_group(
-                    is_expert_parallel=False, independent_all_gather=True
+                    is_expert_parallel=group.is_expert_param, independent_all_gather=True
                 )
                 if ag_group is not None:
                     model_wbuf_dp_group = ag_group
@@ -2724,10 +2735,17 @@ class ParamAndGradBuffer:
 
             new_param.requires_grad_(old_param.requires_grad)
 
-            for tp_attr in ["_mcore_tp", "_tp_partition_dim", "_tp_duplicated"]:
+            for tp_attr in ["_tensor_parallel_mode"]:
                 if getattr(old_param, tp_attr, None) is not None:
                     setattr(new_param, tp_attr, getattr(old_param, tp_attr))
 
+            # For FSDP with delayed_wgrad_compute, `skip_backward_post_hook` needs
+            # to be reset on new param for correct grad accumulation of wgrad computation.
+            setattr(
+                new_param,
+                'skip_backward_post_hook',
+                getattr(old_param, 'skip_backward_post_hook', False),
+            )
         for item_id, p in enumerate(self.params):
             if p in param_map:
                 new_p = param_map[p]
@@ -2878,9 +2896,7 @@ class ParamAndGradBuffer:
                             "partition_stride",
                             "is_embedding_or_output_parameter",
                             "is_embedding_parameter",
-                            "_mcore_tp",
-                            "_tp_duplicated",
-                            "_tp_partition_dim",
+                            "_tensor_parallel_mode",
                         ]:
                             if hasattr(orig_param, attr_name):
                                 setattr(param, attr_name, getattr(orig_param, attr_name))
@@ -2939,8 +2955,9 @@ class ParamAndGradBuffer:
                 item_id, only_shard=sharded_optimizer_state
             )
             if group.main_weight_buffer is not None:
-                if not getattr(self, "use_precision_aware_optimizer", False):
+                if not self.use_decoupled_grad:
                     # Convert the gradient to the main weight buffer dtype.
+                    # TODO(@cspades): Why this is necessary? Casted below.
                     optimizer_grad = optimizer_grad.to(param.dtype)
 
             if name not in self.dist_main_grad:
@@ -2964,9 +2981,9 @@ class ParamAndGradBuffer:
             if optimizer_grad.numel() == 0:
                 grad = None
 
-            # The presence of main_grad_buffer but no main_weight_buffer may imply
-            # that a precision-aware optimizer is used.
-            if getattr(self, "use_precision_aware_optimizer", False):
+            # If use_decoupled_grad (i.e. for precision-aware optimizers like TE FusedAdam),
+            # install the gradient into param.decoupled_grad.
+            if self.use_decoupled_grad:
                 setattr(param, "decoupled_grad", grad)
             else:
                 # Attach the gradient to the optimizer parameter.
@@ -3532,9 +3549,11 @@ class GradReducePipeline:
         for _, _, bucket_id in reversed(self.grad_reduce_queue):
             fsdp_unit_id = param_groups[bucket_id].fsdp_unit_id
             double_buf_units.add(fsdp_unit_id)
-            if len(double_buf_units) > 2:
+            if len(double_buf_units) > 1:
                 keep_n -= 1
-        self.wait_for_previous_grad_reduce(keep_n)
+
+        with torch.cuda.stream(self.rs_stream):
+            self.wait_for_previous_grad_reduce(keep_n)
 
     def get_ready_bucket_group_for_reduction(self, bucket_id: int) -> Optional[List[int]]:
         """Checks if all buckets in the bucket group containing the given bucket_id
@@ -4618,7 +4637,9 @@ def make_fsdp_dtensor(
     orig_param = param
 
     # Handle tensor model parallel specific logic
-    if is_mcore_tensor_model_parallel(param):
+    if not isinstance(param, DTensor) and using_tensor_parallel(
+        dist_index, is_expert_parallel=is_expert_param
+    ):
         # Ensure parameter is not already a DTensor
         assert not isinstance(param, DTensor), (
             "[Megatron-FSDP] Parameter is already a DTensor, yet tensor_model_parallel " "is True."
@@ -4631,35 +4652,34 @@ def make_fsdp_dtensor(
         )
         tp_mesh = dist_index.get_submesh(dist_index.tp_dim, is_expert_parallel=is_expert_param)
         global_shape = list(param.shape)
-        if tp_mesh.mesh.numel() > 1:
-            if is_mcore_tensor_parallel_duplicated(param):
-                placements = [Replicate()]
-                if force_sync_tp_duplicated_param:
-                    if local_tensor.numel() > 0:
-                        torch.distributed.broadcast(
-                            local_tensor, group=tp_mesh.get_group(), group_src=0
-                        )
-                elif run_check:
-                    # TODO: Implement consistency check for duplicated TP parameters
-                    pass
-            else:
-                tp_dim = get_mcore_tensor_parallel_partition_dim(param)
-                assert tp_dim is not None, (
-                    "[Megatron-FSDP] Parameter is not tensor model parallel, "
-                    "yet tensor_model_parallel is True."
-                )
-                placements = [Shard(tp_dim)]
-                global_shape[tp_dim] *= tp_mesh.mesh.numel()
-
-            # Construct TP-sharded DTensor using Megatron-style placement
-            param = DTensor.from_local(
-                local_tensor=local_tensor,
-                device_mesh=tp_mesh,
-                placements=placements,
-                run_check=run_check,
-                shape=tuple(global_shape),
-                stride=torch.empty(global_shape).stride(),
+        if is_mcore_tensor_parallel_duplicated(param):
+            placements = [Replicate()]
+            if force_sync_tp_duplicated_param:
+                if local_tensor.numel() > 0:
+                    torch.distributed.broadcast(
+                        local_tensor, group=tp_mesh.get_group(), group_src=0
+                    )
+            elif run_check:
+                # TODO: Implement consistency check for duplicated TP parameters
+                pass
+        else:
+            tp_dim = get_mcore_tensor_parallel_partition_dim(param)
+            assert tp_dim is not None, (
+                "[Megatron-FSDP] Parameter is not tensor model parallel, "
+                "yet tensor_model_parallel is True."
             )
+            placements = [Shard(tp_dim)]
+            global_shape[tp_dim] *= tp_mesh.mesh.numel()
+
+        # Construct TP-sharded DTensor using Megatron-style placement
+        param = DTensor.from_local(
+            local_tensor=local_tensor,
+            device_mesh=tp_mesh,
+            placements=placements,
+            run_check=run_check,
+            shape=tuple(global_shape),
+            stride=torch.empty(global_shape).stride(),
+        )
 
     # Get FSDP-configured mesh and placements from provided param
     device_mesh, placements = _get_fsdp_tensor_spec(

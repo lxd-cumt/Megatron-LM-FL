@@ -90,6 +90,7 @@ from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
 
+
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
 _EXPERT_PARALLEL_RNG_TRACKER_NAME = 'expert-parallel-rng'

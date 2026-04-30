@@ -1031,7 +1031,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             sequence_parallel=self.config.sequence_parallel,
             fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
             tp_group=tp_group if torch.distributed.is_initialized() else None,
-            tp_size=get_tensor_model_parallel_world_size(),
+            tp_size=self.config.tensor_model_parallel_size,
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
@@ -1541,7 +1541,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             ),
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
-            tp_size=get_tensor_model_parallel_world_size(),
+            tp_size=self.config.tensor_model_parallel_size,
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
@@ -1712,10 +1712,14 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
 
             extra_kwargs = _get_extra_te_kwargs(config)
+            self.delay_wgrad_compute = (
+                self.config.delay_wgrad_compute
+                or self.config.overlap_dispatch_backward_with_experts_wgrad
+            )
 
-            if self.config.delay_wgrad_compute:
+            if self.delay_wgrad_compute:
                 if is_te_min_version("2.3.0"):
-                    extra_kwargs["delay_wgrad_compute"] = self.config.delay_wgrad_compute
+                    extra_kwargs["delay_wgrad_compute"] = True
                 else:
                     raise RuntimeError(
                         "Only TE with version >=2.3.0 supports delay_wgrad_compute now."
@@ -1925,11 +1929,13 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             return state_serialized
 
         def _decode_extra_state(self, state):
+            from megatron.core.safe_globals import SafeUnpickler
+
             if isinstance(state, torch.Tensor):
                 # No FP8 is indicated by an empty tensor we don't need to unpickle.
                 if state.numel() == 0:
                     return
-                return pickle.loads(state.detach().cpu().numpy().tobytes())
+                return SafeUnpickler(io.BytesIO(state.detach().cpu().numpy().tobytes())).load()
             elif isinstance(state, io.BytesIO):
                 state.seek(0)
                 return torch.load(
@@ -2047,7 +2053,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             Compute weight gradients during the backward pass
             if delay_wgrad_compute is enabled.
             """
-            if self.config.delay_wgrad_compute:
+            if self.delay_wgrad_compute:
                 super().backward_dw()
 
     class TEColumnParallelGroupedLinear(TEGroupedLinear):

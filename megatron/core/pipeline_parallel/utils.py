@@ -8,7 +8,12 @@ from typing import Callable, Optional
 import torch
 from torch.autograd import Variable
 
-from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
+from megatron.core.utils import (
+    get_pg_rank,
+    get_pg_size,
+    log_single_rank,
+    make_viewless_tensor,
+)
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform

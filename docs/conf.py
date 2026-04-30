@@ -27,7 +27,7 @@ import sys
 project = "Megatron Core"
 copyright = "2026, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "0.17.0"
+release = "nightly"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -109,7 +109,7 @@ html_theme_options = {
             "icon": "fa-brands fa-github",
         }
     ],
-    "public_docs_features": True
+    "public_docs_features": os.environ.get("SKIP_PUBLIC_DOCS_FEATURES", "false").lower() != "true",
 }
 html_extra_path = ["project.json", "versions1.json"]
 
