@@ -151,7 +151,7 @@ class TransformerConfig(ModelParallelConfig):
     moe_fb_overlap: bool = False
     """Enable MoE forward-backward overlap in DualPipeV scheduling."""
 
-    te_fl_prefer: Optional[str] = "vendor"
+    nvte_plugin_prefer: Optional[str] = "vendor"
     """TE-FL backend preference: 'flagos', 'vendor', or 'reference'."""
     ######## FlagScale End ########
     hidden_size: int = field(default=0, metadata={"argparse_meta": {"default": None}})

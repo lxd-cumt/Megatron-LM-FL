@@ -159,7 +159,7 @@ install_kunlunxin_functional_dependencies() {
 configure_kunlunxin_runtime() {
   # KunLunXin P800 uses XMLIR to expose XPU as a CUDA-compatible device.
   # FlagCx is the collective communication library (KunLunXin's equivalent
-  # of NCCL). TE_FL_SKIP_CUDA prevents NVIDIA CUDA backend probing; KunLunXin
+  # of NCCL). NVTE_PLUGIN_SKIP_CUDA prevents NVIDIA CUDA backend probing; KunLunXin
   # intentionally uses its own vendor implementation in CI.
   ci_export_env XPU 1
   # DISTRIBUTED_BACKEND is NOT exported: XMLIR's mock_torch intercepts NCCL
@@ -169,11 +169,12 @@ configure_kunlunxin_runtime() {
   # causes gather()/gather_object() failures because FlagCX does not fully
   # implement these operations yet (backend_flagcx.cpp:1035 error).
   # ci_export_env DISTRIBUTED_BACKEND flagcx
-  ci_export_env TE_FL_SKIP_CUDA 1
+  ci_export_env NVTE_PLUGIN transformer_engine_plugin_fl
+  ci_export_env NVTE_PLUGIN_SKIP_CUDA 1
   ci_export_env KLX_USE_AUTOTUNE 0
   # Use the validated KunLunXin vendor path. The long-sequence benchmark
   # remains disabled because this backend has high startup cost for that case.
-  ci_export_env TE_FL_PREFER vendor
+  ci_export_env NVTE_PLUGIN_PREFER vendor
 }
 
 validate_kunlunxin_capacity() {

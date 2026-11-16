@@ -299,7 +299,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "softmax_scale": None,
     "softmax_type": "vanilla",
     "symmetric_ar_type": None,
-    "te_fl_prefer": "vendor",
+    "nvte_plugin_prefer": "vendor",
     "tensor_model_parallel_size": 2,
     "test_mode": False,
     "timers": None,

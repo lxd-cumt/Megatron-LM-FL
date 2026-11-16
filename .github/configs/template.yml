@@ -49,7 +49,7 @@ test_matrix:
 
 te_fl:
   prepare: false
-  # Use cuda for native CUDA extensions or python for TE_FL_SKIP_CUDA=1.
+  # Use cuda for native CUDA extensions or python for NVTE_PLUGIN_SKIP_CUDA=1.
   build_mode: python
   build_environment: {}
   runtime:

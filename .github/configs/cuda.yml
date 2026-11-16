@@ -228,7 +228,7 @@ te_fl:
     TORCH_CUDA_ARCH_LIST: "8.0"
   runtime:
     environment:
-      TE_FL_PREFER: flagos
+      NVTE_PLUGIN_PREFER: flagos
     install_pip_args: []
     pip_packages: [flag-gems, sqlalchemy]
 

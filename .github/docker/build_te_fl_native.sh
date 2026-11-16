@@ -20,6 +20,13 @@ mkdir -p "$OUTPUT_DIR"
 find "$OUTPUT_DIR" -maxdepth 1 -type f -name 'transformer_engine*.whl' -delete
 
 echo "Building TransformerEngine-FL wheel from $TE_FL_REPO"
+# NVTE_PLUGIN and NVTE_PLUGIN_SKIP_CUDA=1 are required when building the new
+# two-repo layout (TransformerEngine interface + TransformerEngine-Plugin-FL).
+# NVTE_PLUGIN activates the plugin-only code path in setup.py; without it
+# NVTE_PLUGIN_SKIP_CUDA is ignored and the build falls through to the CUDA
+# toolchain (which is absent on non-CUDA platforms).
+NVTE_PLUGIN="${NVTE_PLUGIN:-transformer_engine_plugin_fl}" \
+NVTE_PLUGIN_SKIP_CUDA=1 \
 "$python_bin" -m pip wheel \
   --no-deps \
   --no-build-isolation \

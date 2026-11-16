@@ -38,8 +38,9 @@ configure_hygon_runtime() {
   ci_export_env TORCH_CPP_LOG_LEVEL WARNING
   # PyTorch otherwise starts 32 Inductor workers per rank in this image.
   ci_export_env TORCHINDUCTOR_COMPILE_THREADS 1
-  ci_export_env TE_FL_SKIP_CUDA 1
-  ci_export_env TE_FL_PREFER flagos
+  ci_export_env NVTE_PLUGIN transformer_engine_plugin_fl
+  ci_export_env NVTE_PLUGIN_SKIP_CUDA 1
+  ci_export_env NVTE_PLUGIN_PREFER flagos
   ci_export_env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD 1
   ci_export_env NVTE_FUSED_ATTN 0
   ci_export_env DTK_HOME "$dtk_home"

@@ -481,7 +481,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
-        te_fl_prefer,  # FlagScale Modify
+        nvte_plugin_prefer,  # FlagScale Modify
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
@@ -500,7 +500,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
-        ctx.te_fl_prefer = te_fl_prefer  # FlagScale Modify
+        ctx.nvte_plugin_prefer = nvte_plugin_prefer  # FlagScale Modify
 
         if sequence_parallel:
             dim_size = list(input.size())
@@ -614,7 +614,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
                     ######## FlagScale Begin ########
-                    if not (ctx.te_fl_prefer == 'flagos' or ctx.te_fl_prefer == 'reference'):
+                    if not (ctx.nvte_plugin_prefer == 'flagos' or ctx.nvte_plugin_prefer == 'reference'):
                         if weight.main_grad.dtype == torch.float32:
                             fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
                                 total_input, grad_output, weight.main_grad
@@ -710,7 +710,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
-    te_fl_prefer: Optional[str] = 'vendor',  # FlagScale Modify
+    nvte_plugin_prefer: Optional[str] = 'vendor',  # FlagScale Modify
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -787,7 +787,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
-        te_fl_prefer,  # FlagScale Modify
+        nvte_plugin_prefer,  # FlagScale Modify
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -1028,7 +1028,7 @@ class ColumnParallelLinear(torch.nn.Module):
         if not weight.requires_grad:
             return linear_with_frozen_weight(input, weight, *args, **kwargs)
         else:
-            kwargs['te_fl_prefer'] = self.config.te_fl_prefer  # FlagScale Modify
+            kwargs['nvte_plugin_prefer'] = self.config.nvte_plugin_prefer  # FlagScale Modify
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
     @overridable  # FlagScale Modify

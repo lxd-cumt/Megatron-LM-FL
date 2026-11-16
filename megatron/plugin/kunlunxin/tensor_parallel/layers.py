@@ -41,7 +41,7 @@ try:
             grad_output_buffer: Optional[List[torch.Tensor]] = None,
             wgrad_deferral_limit: Optional[int] = 0,
             tp_group: Optional[torch.distributed.ProcessGroup] = None,
-            te_fl_prefer: Optional[str] = None,
+            nvte_plugin_prefer: Optional[str] = None,
         ) -> torch.Tensor:
             """Forward pass of XPU fused tensor-parallel linear."""
             log_patch("tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunicationKunlunxin.forward")

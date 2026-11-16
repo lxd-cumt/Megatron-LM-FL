@@ -101,8 +101,8 @@ jobs:
               ;;
           esac
           if [ "$build_mode" = python ] && \
-             [ "$(yq -r '.te_fl.build_environment.TE_FL_SKIP_CUDA // ""' "$config_file")" != 1 ]; then
-            echo "::error::Python-only TE-FL preparation requires TE_FL_SKIP_CUDA=1" >&2
+             [ "$(yq -r '.te_fl.build_environment.NVTE_PLUGIN_SKIP_CUDA // ""' "$config_file")" != 1 ]; then
+            echo "::error::Python-only TE-FL preparation requires NVTE_PLUGIN_SKIP_CUDA=1" >&2
             exit 1
           fi
           if ! [[ "$nproc_per_node" =~ ^[1-9][0-9]*$ ]]; then
