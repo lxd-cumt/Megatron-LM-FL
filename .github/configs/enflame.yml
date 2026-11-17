@@ -72,6 +72,10 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the enflame CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the enflame CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the enflame CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "DSA Triton tests require SM90+ CUDA hardware; this runtime has no compatible runner."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # Flash Attention GCU: undefined symbol (_ZN3c1013MessageLoggerC1EPKcii)
@@ -353,6 +357,8 @@ test_matrix:
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
       # TE-FL vendor.enflame missing rmsnorm_bwd_add operator
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton compiles out of time.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
 
       # others

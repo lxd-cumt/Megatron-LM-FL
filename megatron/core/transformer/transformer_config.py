@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # before torch, it registers the same namespace first, causing:
 # "RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton"
 try:
-    import triton  # noqa: F401
+    import triton  # noqa: F401  # pylint: disable=unused-import
 
     HAVE_TRITON = True
 except ImportError:
@@ -32,19 +32,22 @@ from megatron.core.transformer.cuda_graph_config import (
     normalize_inference_cuda_graph_scope,
     validate_deprecated_cuda_graph_modules_migration_inputs,
 )
+from megatron.core.transformer.enums import LayerType  # FlagScale Modify
 from megatron.core.transformer.enums import (
     AttnBackend,
     CudaGraphModule,
     CudaGraphScope,
     InferenceCudaGraphScope,
-    LayerType,  # FlagScale Modify
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.plugin.decorators import overridable  # FlagScale Modify
+from megatron.plugin.platform import get_platform  # FlagScale Modify
 
 from .._rank_utils import log_single_rank
 from ..fusions.fused_bias_geglu import quick_gelu
 from ..model_parallel_config import ModelParallelConfig
 from ..utils import (
+    _validate_dsa_kernel_backend_dependencies,
     get_te_version,
     init_method_normal,
     is_te_min_version,
@@ -52,7 +55,7 @@ from ..utils import (
     mup_scaled_init_method_normal,
     scaled_init_method_normal,
 )
-from megatron.plugin.decorators import overridable  # FlagScale Modify
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -311,24 +314,19 @@ class TransformerConfig(ModelParallelConfig):
     """Number of residual branches for hyper connections.
     Only used when enable_hyper_connections is True."""
 
-    mhc_sinkhorn_iterations: int = 10
+    mhc_sinkhorn_iterations: int = 20
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
 
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
     use_fused_mhc: bool = False
-    """Use unified fused kernels for mHC operations.
+    """Use unified fused kernels for mHC operations."""
 
-    When True, attempts to replace the reference mHC modules (SinkhornKnopp,
-    H_aggregate, H_post_bda, ProjRms) with fused/autograd implementations for
-    better performance on supported GPUs.  Backend selection is internal and
-    op-specific: Triton for Sinkhorn and H_post_bda backward when available,
-    cuTile for the remaining fused kernels when available, then native torch
-    fallback. If every mHC operation uses the native torch fallback,
-    use_fused_mhc remains enabled and a rank-0 warning is emitted. The all-native
-    fallback is functionally equivalent, but may not provide fused backend
-    performance benefits.
+    mhc_fused_backend: Literal["auto", "native", "triton", "cutile"] = "auto"
+    """Backend policy for fused mHC operations; auto selects per operation.
+
+    Explicit backends fail if unavailable instead of silently falling back.
     """
 
     mhc_recompute_layer_num: Optional[int] = None
@@ -383,12 +381,10 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # attention variant
     ####################
-    ######## FlagScale Begin ########
     experimental_attention_variant: Optional[Literal['gated_delta_net', 'dsa', 'dsv4_hybrid']] = (
         None
     )
     """Type of attention variant to use. Currently support gated_delta_net, dsa, and dsv4_hybrid."""
-    ######## FlagScale End ########
     ####################
     # DSA
     ####################
@@ -424,7 +420,6 @@ class TransformerConfig(ModelParallelConfig):
       - Segments after repeat() become suffix (appended at the end)
     """
     ######## FlagScale End ########
-    ######## FlagScale Begin ########
     ####################
     # DeepSeek-v4 hybrid attention
     ####################
@@ -441,12 +436,36 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use dense mode for compressed sparse attention. If True, the CSA indexer will be
     disabled."""
 
-    apply_dsa_kernel_fusion: bool = False
-    """If True, use fused DSA sparse-attention kernels. On SM100+ (Blackwell), uses FlashMLA
-    forward + cuDNN DSA backward (requires ``flash_mla`` and ``nvidia-cudnn-frontend``).
-    On SM90 (Hopper), uses Triton-based fused kernels (requires ``triton>=3.0``).
-    When False, falls back to unfused PyTorch implementations."""
-    ######## FlagScale End ########
+    dsa_indexer_topk_freq: int = 1
+    """Frequency of DSA indexer top-k computation across layers.
+    A value greater than 1 enables cross-layer top-k sharing."""
+    dsa_indexer_skip_topk_offset: int = 0
+    """Layer offset for DSA cross-layer top-k sharing."""
+    dsa_kernel_backend: Literal["none", "cudnn"] | None = None
+    """Optional fused DSA kernel backend.
+    When unset, DSv4 hybrid uses ``cudnn`` and other attention variants use ``none``.
+    ``none`` disables fused DSA kernels. Explicit ``cudnn`` enables only that backend.
+    Unsupported DSA layouts continue to use the PyTorch fallback."""
+
+    dsa_indexer_rope_interleaved: bool = False
+    """Whether DSA indexer RoPE should use MLA-style interleaving."""
+    dsa_indexer_rotate_activation: bool = True
+    """Whether DSA indexer should apply Hadamard rotate_activation to q/k before scoring."""
+    dsa_indexer_scoring_relu: bool = True
+    """Whether DSA indexer should apply ReLU to q@k^T scores before weighting."""
+    dsa_indexer_k_norm_epsilon: Optional[float] = None
+    """Optional epsilon override for the DSA indexer key LayerNorm."""
+    dsa_indexer_k_norm_fp32: bool = False
+    """Whether DSA indexer key LayerNorm should run on fp32 inputs."""
+    dsa_indexer_weights_proj_use_quantization: bool = True
+    """Whether ``DSAIndexer`` weights projection follows the enclosing FP8/FP4
+    quantization context. Disable this to keep the projection parameter outside FP8/FP4;
+    ``dsa_indexer_weights_proj_output_dtype`` then controls its BF16 or FP32 output contract."""
+    dsa_indexer_weights_proj_output_dtype: Literal["bf16", "fp32"] = "bf16"
+    """Output dtype of the ``DSAIndexer`` weights projection. BF16 preserves the existing
+    path. FP32 uses a true FP32-output projection and is not compatible with the cuDNN DSA
+    backend. The final index scores remain FP32 independently of this option."""
+
     ####################
     # linear attention
     ####################
@@ -659,7 +678,8 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts", "mhc".
+    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe",
+    "shared_experts", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
     "moe_act": recompute the MoE MLP activation function.
@@ -1365,6 +1385,7 @@ class TransformerConfig(ModelParallelConfig):
 
     lora_out_init_method: str = "zero"
     """Initialization method for LoRA B matrix."""
+
     ######## FlagScale End ########
     @overridable  # FlagScale Modify
     def __post_init__(self):
@@ -1373,6 +1394,11 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+
+        if self.dsa_kernel_backend is None:
+            self.dsa_kernel_backend = (
+                "cudnn" if self.experimental_attention_variant == "dsv4_hybrid" else "none"
+            )
 
         # When fp32 residual connections are enabled, pipeline parallel communication must
         # use fp32 to match the dtype of the residual stream between pipeline stages.
@@ -1420,6 +1446,30 @@ class TransformerConfig(ModelParallelConfig):
                 f"tensor_model_parallel_size ({self.tensor_model_parallel_size})."
             )
 
+        if self.dsa_indexer_weights_proj_output_dtype not in ("bf16", "fp32"):
+            raise ValueError(
+                "dsa_indexer_weights_proj_output_dtype must be either 'bf16' or 'fp32', got "
+                f"{self.dsa_indexer_weights_proj_output_dtype!r}."
+            )
+        if (
+            self.dsa_indexer_weights_proj_use_quantization
+            and self.dsa_indexer_weights_proj_output_dtype == "fp32"
+        ):
+            raise ValueError(
+                "dsa_indexer_weights_proj_output_dtype='fp32' requires "
+                "dsa_indexer_weights_proj_use_quantization=False because quantized "
+                "TELinear does not guarantee a true-FP32 output for this projection."
+            )
+        if (
+            self.dsa_indexer_weights_proj_output_dtype == "fp32"
+            and self.dsa_kernel_backend == "cudnn"
+        ):
+            raise ValueError(
+                "dsa_indexer_weights_proj_output_dtype='fp32' is not supported by "
+                "dsa_kernel_backend='cudnn', which requires a BF16 indexer weights tensor. "
+                "Use dsa_kernel_backend='none'."
+            )
+
         if self.experimental_attention_variant == "gated_delta_net":
             assert (
                 self.linear_attention_freq is not None
@@ -1458,6 +1508,7 @@ class TransformerConfig(ModelParallelConfig):
             )
         ######## FlagScale Begin ########
         elif self.experimental_attention_variant == "dsa":
+            _validate_dsa_kernel_backend_dependencies(self.dsa_kernel_backend)
             # Expand indexer_type_rule into indexer_types list
             if self.indexer_type_rule is not None and self.indexer_types is None:
                 self.indexer_types = self._parse_indexer_type_rule(
@@ -1474,7 +1525,6 @@ class TransformerConfig(ModelParallelConfig):
                     f"got {set(self.indexer_types) - valid_types}"
                 )
         ######## FlagScale End ########
-        ######## FlagScale Begin ########
         elif self.experimental_attention_variant == "dsv4_hybrid":
             assert self.multi_latent_attention, "DSv4 Hybrid requires multi_latent_attention."
             assert self.csa_compress_ratios is not None, "csa_compress_ratios must be set"
@@ -1491,59 +1541,28 @@ class TransformerConfig(ModelParallelConfig):
                 self.tensor_model_parallel_size == 1
             ), "DSv4 Hybrid Attention only supports TP size 1."
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
-            self.hetereogenous_dist_checkpoint = True
-
-            if self.apply_dsa_kernel_fusion:
-                assert (
-                    torch.cuda.is_available()
-                ), "apply_dsa_kernel_fusion requires a CUDA device, but none is available."
+            _validate_dsa_kernel_backend_dependencies(self.dsa_kernel_backend)
+            if self.dsa_kernel_backend == "cudnn":
                 sm = torch.cuda.get_device_capability()
                 assert sm[0] >= 9, (
-                    f"apply_dsa_kernel_fusion requires SM90+ (Hopper or later), "
+                    "dsa_kernel_backend='cudnn' requires SM90+ (Hopper or later), "
                     f"but current device has compute capability {sm[0]}.{sm[1]}."
                 )
+                uses_ratio4_indexer = 4 in self.csa_compress_ratios and not self.csa_dense_mode
+                indexer_loss_enabled = (self.dsa_indexer_loss_coeff or 0.0) > 0
+                if (
+                    sm[0] == 9
+                    and uses_ratio4_indexer
+                    and indexer_loss_enabled
+                    and not self.dsa_indexer_use_sparse_loss
+                ):
+                    raise ValueError(
+                        "DSv4 with fused DSA and dense indexer loss is not supported on SM90 "
+                        "because the cuDNN Frontend SM90 dense DSA kernels are not reliable for "
+                        "this path. Use sparse indexer loss or set dsa_kernel_backend='none'."
+                    )
+            self.hetereogenous_dist_checkpoint = True
 
-                if sm[0] >= 10:
-                    # SM100+ (Blackwell): require FlashMLA + cuDNN DSA
-                    _flash_mla_available = True
-                    try:
-                        from flash_mla import flash_mla_sparse_fwd  # noqa: F401
-                    except ImportError:
-                        _flash_mla_available = False
-
-                    _cudnn_dsa_available = True
-                    try:
-                        from cudnn import DSA  # noqa: F401
-                    except ImportError:
-                        _cudnn_dsa_available = False
-
-                    if not _flash_mla_available or not _cudnn_dsa_available:
-                        missing = []
-                        if not _flash_mla_available:
-                            missing.append(
-                                "flash_mla (install from "
-                                "https://github.com/deepseek-ai/FlashMLA/tree/nv_dev)"
-                            )
-                        if not _cudnn_dsa_available:
-                            missing.append("cudnn-frontend DSA (nvidia-cudnn-frontend[cutedsl])")
-                        raise ValueError(
-                            f"apply_dsa_kernel_fusion on SM100+ requires fused DSA kernels, "
-                            f"but the following packages are not available: "
-                            f"{', '.join(missing)}. "
-                            f"Install them or pass --no-dsa-kernel-fusion to use the unfused "
-                            f"PyTorch fallback."
-                        )
-                else:
-                    ######## FlagScale Begin ########
-                    # SM90 (Hopper): require Triton-based fused kernels
-                    if not HAVE_TRITON:
-                        raise ImportError(
-                            "apply_dsa_kernel_fusion on SM90 requires Triton for the "
-                            "fused sparse-attention kernels. Install triton>=3.0 or "
-                            "pass --no-dsa-kernel-fusion to use the unfused PyTorch fallback."
-                        )
-                    ######## FlagScale End ########
-        ######## FlagScale End ########
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling
             if self.first_last_layers_bf16 and self.fp8_recipe == Fp8Recipe.delayed:
@@ -1946,6 +1965,25 @@ class TransformerConfig(ModelParallelConfig):
                 self.recompute_modules.append("moe")
 
         ######## FlagScale Begin ########
+        if self.mhc_fused_backend not in ("auto", "native", "triton", "cutile"):
+            raise ValueError("mhc_fused_backend must be auto, native, triton, or cutile")
+        if self.use_fused_mhc and self.mhc_fused_backend in ("auto", "triton"):
+            platform_name = get_platform().platform_name()
+            # MetaX exposes the CUDA API rather than a separate platform.
+            if platform_name == "cuda" and getattr(torch.version, "maca", None):
+                platform_name = "metax"
+            if platform_name in ("kunlunxin", "metax"):
+                raise ValueError(
+                    f"Triton fused mHC kernels are incompatible with {platform_name} "
+                    f"(mhc_fused_backend={self.mhc_fused_backend!r}). "
+                    "Set mhc_fused_backend='native' or use_fused_mhc=False."
+                )
+            if platform_name in ("npu", "enflame"):
+                warnings.warn(
+                    f"Triton fused mHC kernels have known compilation timeouts on {platform_name} "
+                    f"(mhc_fused_backend={self.mhc_fused_backend!r}). "
+                    "Set mhc_fused_backend='native' or use_fused_mhc=False to avoid this path."
+                )
         # Validation for "mhc" in recompute_modules
         if self.recompute_granularity == "selective" and "mhc" in self.recompute_modules:
             if not self.enable_hyper_connections:
@@ -2785,6 +2823,20 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError("fused permutation is not available. Please install TE >= 2.1.0.")
 
         if self.overlap_moe_expert_parallel_comm:
+            if self.pipeline_model_parallel_layout is not None:
+                for stages in self.pipeline_model_parallel_layout.layout:
+                    for stage in stages:
+                        if LayerType.mtp in stage and LayerType.decoder not in stage:
+                            raise ValueError(
+                                "overlap_moe_expert_parallel_comm requires MTP to share a "
+                                "pipeline stage (and virtual stage) with decoder layers; "
+                                "a standalone MTP stage is not supported."
+                            )
+            if self.enable_hyper_connections and self.cuda_graph_impl != "none":
+                raise NotImplementedError(
+                    "mHC EP overlap currently requires cuda_graph_impl='none'; "
+                    "CUDA graph replay does not yet carry the per-microbatch mHC state."
+                )
             # TODO: remove this after we fix the hang issue with torch version < 2.6.0
             assert is_torch_min_version(
                 "2.6.0"
@@ -2934,9 +2986,16 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_kitchen
 
         if self.experimental_attention_variant == "dsa":
-            assert (
-                self.context_parallel_size == 1
-            ), "Currently context parallelism is not supported by DSAttention!"
+            if self.context_parallel_size > 1:
+                cp_comm_types = (
+                    self.cp_comm_type
+                    if isinstance(self.cp_comm_type, list)
+                    else [self.cp_comm_type]
+                )
+                assert all(
+                    comm_type is not None and comm_type.replace("_", "").lower() == "allgather"
+                    for comm_type in cp_comm_types
+                ), "DSAttention context parallelism currently supports cp_comm_type=allgather only."
             assert not self.apply_rope_fusion, "RoPE fusion is not supported for DSAttention"
 
         if self.inference_fuse_tp_communication:
@@ -3038,7 +3097,9 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         return result
+
     ######## FlagScale End ########
+
 
 @dataclass
 class MLATransformerConfig(TransformerConfig):

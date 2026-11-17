@@ -1,6 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import logging
+import weakref
 from contextlib import contextmanager
 from typing import Optional
 
@@ -11,7 +12,7 @@ from ..optimizer.param_layout import FullParamLayout
 from ..process_groups_config import ProcessGroupCollection
 from ..transformer.cuda_graphs import is_graph_capturing
 from ..transformer.transformer_config import TransformerConfig
-from ..utils import log_single_rank
+from ..utils import PARAM_READY_CALLBACK_ATTR, log_single_rank
 from .data_parallel_base import _BaseDataParallel
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .param_and_grad_buffer import _ParamAndGradBuffer, group_params_for_buffers, partition_buckets
@@ -23,6 +24,64 @@ cur_platform = get_platform()
 ######## FlagScale End ########
 
 logger = logging.getLogger(__name__)
+
+
+class _BucketParamReadyCallback:
+    """Publishes one bucket group's parameters on demand.
+
+    DDP's side of ``megatron.core.utils.ensure_params_ready``: one instance is stored on every
+    parameter of the group under ``PARAM_READY_CALLBACK_ATTR``, and calling it makes those
+    parameters readable. For consumers reading ``param.data`` ahead of the owning module's
+    pre-hook.
+
+    Publishing may START an undispatched gather, not just wait on one. Holds DDP and the bucket
+    group weakly; the callback outlives this DDP on re-wrap. No-ops under CUDA-graph capture, so
+    a consumer that captures its reads must replay this itself.
+    """
+
+    def __init__(self, ddp: 'DistributedDataParallel', bucket_group) -> None:
+        self._ddp = weakref.ref(ddp)
+        self._bucket_group = weakref.ref(bucket_group)
+
+    def __call__(self) -> None:
+        bucket_group = self._bucket_group()
+        if bucket_group is None:
+            return
+
+        # HOT PATH: already published. True for every microbatch after the first one of an
+        # iteration, so it precedes the DDP deref and the graph-capture query.
+        if bucket_group.param_gather_dispatched and bucket_group.param_gather_handle is None:
+            return
+
+        ddp = self._ddp()
+        if ddp is None:
+            # Weakref is dead: the DDP object was garbage-collected while this callback lived on
+            # (it is stored on the parameters, which outlive the wrapper). Its buffers are gone.
+            return
+
+        if is_graph_capturing():
+            # A captured collective re-runs on EVERY replay: once per microbatch, not once per
+            # iteration. Consumers that capture their reads must publish before launching.
+            return
+
+        # No pre-hooks installed means the caller removed them and now drives param sync itself
+        # (``disable_forward_pre_hook(param_sync=False)``), so the schedule is not ours to touch.
+        ddp_owns_schedule = bool(ddp.remove_forward_pre_hook_handles)
+
+        if bucket_group.param_gather_handle is not None:
+            # A gather is in flight over the very buffer we are about to read, so it must be
+            # waited on. finish_param_sync() does two things: wait for THIS bucket, then start
+            # the NEXT bucket's gather. The wait is mandatory; starting the next bucket is a
+            # scheduling decision, so only let it happen while DDP still owns the schedule.
+            if ddp_owns_schedule:
+                ddp._finish_param_sync_for_bucket_group(bucket_group)
+            else:
+                bucket_group.finish_param_sync(skip_next_bucket_dispatch=True)
+        elif ddp_owns_schedule:
+            # No handle and not published (the hot path returned above) => never dispatched, so
+            # publishing STARTS a gather. Only safe while DDP owns the schedule.
+            assert not bucket_group.param_gather_dispatched
+            ddp._finish_param_sync_for_bucket_group(bucket_group)
 
 
 class DistributedDataParallel(_BaseDataParallel):
@@ -131,7 +190,7 @@ class DistributedDataParallel(_BaseDataParallel):
             param_to_name[param] = name
             all_params.append(param)
 
-        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).  # FlagScale Modify
+        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).
         buffer_groups = group_params_for_buffers(all_params, self.ddp_config.grad_reduce_in_fp32)
 
         # Auto-compute layouts when using distributed optimizer but no layout was provided.
@@ -156,9 +215,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 expert_data_parallel_world_size=self.intra_expt_dp_group.size(),
                 ######## FlagScale Begin ########
                 engram_data_parallel_world_size=(
-                    self.engram_dp_group.size()
-                    if self.engram_dp_group is not None
-                    else None
+                    self.engram_dp_group.size() if self.engram_dp_group is not None else None
                 ),
                 ######## FlagScale End ########
             )
@@ -182,6 +239,7 @@ class DistributedDataParallel(_BaseDataParallel):
         self.full_param_layout = full_param_layout
 
         # Compute gradient scaling factors.
+        engram_embedding_gradient_scaling_factor = None
         if config.calculate_per_token_loss:
             assert (
                 not self.ddp_config.average_in_collective
@@ -224,7 +282,9 @@ class DistributedDataParallel(_BaseDataParallel):
 
                 gradient_scaling_factor = 1.0 / data_parallel_world_size
                 expert_gradient_scaling_factor = 1.0 / data_parallel_world_size
-                engram_embedding_gradient_scaling_factor = 1.0 / data_parallel_world_size  # FlagScale Modify
+                engram_embedding_gradient_scaling_factor = (
+                    1.0 / data_parallel_world_size
+                )  # FlagScale Modify
 
         # Allocate buffers for each group.
         self.buffers = []
@@ -237,6 +297,8 @@ class DistributedDataParallel(_BaseDataParallel):
                 scaling_factor = expert_gradient_scaling_factor
             ######## FlagScale Begin ########
             elif buffer_key.is_engram_parallel:
+                if self.engram_dp_group is None:
+                    raise ValueError("Engram parameters require an Engram data parallel group")
                 data_parallel_group = self.engram_dp_group
                 scaling_factor = engram_embedding_gradient_scaling_factor
             ######## FlagScale End ########
@@ -327,8 +389,14 @@ class DistributedDataParallel(_BaseDataParallel):
             assert (
                 self.ddp_config.use_distributed_optimizer
             ), 'Partial DistOpt cannot be used without DistOpt'
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
-                communication_stream = cur_platform.Stream(device=cur_platform.current_device())  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
+                communication_stream = cur_platform.Stream(
+                    device=cur_platform.current_device()
+                )  # FlagScale Modify
                 for bucket_group in bucket_groups:
                     bucket_group.inter_distributed_optimizer_instance_group = (
                         self.inter_dist_opt_group
@@ -341,7 +409,11 @@ class DistributedDataParallel(_BaseDataParallel):
         # layer-wise optimizer cases; the latter sets overlap_param_gather=True
         # without use_distributed_optimizer.
         if self.ddp_config.overlap_param_gather:
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
                 num_bucket_groups = len(bucket_groups)
                 for i in range(1, num_bucket_groups):
                     bucket_groups[num_bucket_groups - i].next_param_gather_bucket_group = (
@@ -361,16 +433,34 @@ class DistributedDataParallel(_BaseDataParallel):
             and self.ddp_config.reduce_scatter_with_fp32_accumulation
             and self.ddp_config.num_distributed_optimizer_instances == 1
         ):
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
                 for i in range(1, len(bucket_groups)):
                     bucket_groups[i].previous_grad_reduce_bucket_group = bucket_groups[i - 1]
 
         # Create map from param to bucket group, used in pre_hook.
-        for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+        for bucket_groups in [
+            self.bucket_groups,
+            self.expert_parallel_bucket_groups,
+            self.engram_embedding_bucket_groups,  # FlagScale Modify
+        ]:
             for bucket_group in bucket_groups:
+                ready_callback = (
+                    _BucketParamReadyCallback(self, bucket_group)
+                    if self.ddp_config.overlap_param_gather
+                    else None
+                )
                 for bucket in bucket_group.buckets:
                     for param in bucket.params_list:
                         self.param_to_bucket_group[param] = bucket_group
+                        if ready_callback is not None:
+                            setattr(param, PARAM_READY_CALLBACK_ATTR, ready_callback)
+                        elif hasattr(param, PARAM_READY_CALLBACK_ATTR):
+                            # Re-wrapping without overlap must not retain the old DDP's callback.
+                            delattr(param, PARAM_READY_CALLBACK_ATTR)
 
         # Delete references to weight_tensor if they exist since we don't want two parameter copies
         # if we re-mapped parameters (which happens when we use the distributed optimizer).
@@ -475,19 +565,20 @@ class DistributedDataParallel(_BaseDataParallel):
                     continue
                 assert param.requires_grad
 
-                # If aligning param all-gather across pipeline stages, all-gather is dispatched
-                # by start_param_sync calls in core/pipeline_parallelism/schedules.py.
-                # If overlapping param all-gather with optimizer step, then all-gather has
-                # already been dispatched in optimizer step.
-                skip_next_bucket_dispatch = (
-                    self.ddp_config.align_param_gather
-                    or self.overlap_param_gather_with_optimizer_step
-                )
-                self.param_to_bucket_group[param].finish_param_sync(
-                    skip_next_bucket_dispatch=skip_next_bucket_dispatch
-                )
+                self._finish_param_sync_for_bucket_group(self.param_to_bucket_group[param])
 
         return hook
+
+    def _finish_param_sync_for_bucket_group(self, bucket_group):
+        """Drain one bucket group's param all-gather and run its post-all-gather processing."""
+        # If aligning param all-gather across pipeline stages, all-gather is dispatched
+        # by start_param_sync calls in core/pipeline_parallelism/schedules.py.
+        # If overlapping param all-gather with optimizer step, then all-gather has
+        # already been dispatched in optimizer step.
+        skip_next_bucket_dispatch = (
+            self.ddp_config.align_param_gather or self.overlap_param_gather_with_optimizer_step
+        )
+        bucket_group.finish_param_sync(skip_next_bucket_dispatch=skip_next_bucket_dispatch)
 
     def _make_backward_post_hook(self, param: torch.nn.Parameter):
         """
@@ -524,12 +615,20 @@ class DistributedDataParallel(_BaseDataParallel):
         """
         Context manager that turns off gradient synchronization.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:  # FlagScale Modify
+        for bucket_group in (
+            self.bucket_groups
+            + self.expert_parallel_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
+        ):
             bucket_group.is_last_microbatch = False
         try:
             yield
         finally:
-            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:  # FlagScale Modify
+            for bucket_group in (
+                self.bucket_groups
+                + self.expert_parallel_bucket_groups
+                + self.engram_embedding_bucket_groups  # FlagScale Modify
+            ):
                 bucket_group.is_last_microbatch = True
 
     def _start_bucket_group_param_sync(
@@ -569,11 +668,11 @@ class DistributedDataParallel(_BaseDataParallel):
             if self.overlap_param_gather_with_optimizer_step and not force_dispatch:
                 return
 
-        ######## FlagScale Begin ########
-
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
-
-        ######## FlagScale End ########
+        for bucket_group in (
+            self.bucket_groups
+            + self.expert_parallel_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
+        ):
             self._start_bucket_group_param_sync(bucket_group, force_sync=force_sync)
 
     def start_grad_sync(self, *unused):
@@ -585,13 +684,11 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.start_grad_sync()
 
     def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
@@ -603,29 +700,29 @@ class DistributedDataParallel(_BaseDataParallel):
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.finish_grad_sync(force_all_reduce=force_all_reduce)
 
     def free_overlap_buffers(self):
         """Free overlap param-gather GPU buffers across all bucket groups."""
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.free_overlap_buffers()
 
     def scale_gradients(self, scaling_factor: float):
         """Scale all gradients inside the buffers by `scaling_factor`."""
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.scale_gradients(scaling_factor)
 
     def zero_grad_buffer(self):
@@ -639,15 +736,18 @@ class DistributedDataParallel(_BaseDataParallel):
             # to True, and there will be a double-GA.
             for param in self.params_with_grad:
                 param.grad_added_to_main_grad = False
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.reset()
-        ######## FlagScale Begin ########
+
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.reset()
 
     def broadcast_params(self):
@@ -688,7 +788,11 @@ class DistributedDataParallel(_BaseDataParallel):
         if synchronize:
             cur_platform.synchronize()  # FlagScale Modify
 
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.offload_to_cpu(move_params=False, move_grads=True)
 
         if empty_cache:
@@ -705,7 +809,11 @@ class DistributedDataParallel(_BaseDataParallel):
         Args:
             synchronize: Whether to call torch.cuda.synchronize() after allocation.
         """
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.reload_from_cpu(move_params=False, move_grads=True)
 
         if synchronize:

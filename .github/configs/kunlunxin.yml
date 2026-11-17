@@ -70,6 +70,10 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "DSA Triton tests require SM90+ CUDA hardware; this runtime has no compatible runner."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
@@ -296,6 +300,8 @@ test_matrix:
       # RMSNorm backward + residual add); only rmsnorm_bwd is available.
       # ascend and metax also ignore this file for the same reason.
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton is incompatible.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
 
       # others
